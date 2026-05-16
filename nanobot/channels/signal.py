@@ -8,21 +8,18 @@ import re
 import shutil
 import unicodedata
 from collections import deque
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import httpx
-from pydantic import Field, computed_field, field_validator
+from pydantic import Field
 
-from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
-from nanobot.pairing import is_approved
 from nanobot.utils.helpers import safe_filename, split_message
 
 
@@ -33,42 +30,25 @@ class _Run:
     opaque: bool = False  # code / table content — skip further pattern processing
 
 
-_SIG_CODE_BLOCK_RE = re.compile(r"```(?:\w+)?\n?([\s\S]*?)```")
-_SIG_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
-_SIG_HEADER_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
-_SIG_BLOCKQUOTE_RE = re.compile(r"^>\s*(.*)$", re.MULTILINE)
-_SIG_BULLET_RE = re.compile(r"^[-*]\s+", re.MULTILINE)
-_SIG_OLIST_RE = re.compile(r"^(\d+)\.\s+", re.MULTILINE)
-_SIG_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
-_SIG_BOLD_RE = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.DOTALL)
-_SIG_ITALIC_RE = re.compile(
-    r"(?<!\*)\*([^*\n]+)\*(?!\*)|(?<![a-zA-Z0-9_])_([^_\n]+)_(?![a-zA-Z0-9_])"
-)
-_SIG_STRIKE_RE = re.compile(r"~~(.+?)~~|(?<![~\w])~([^~\n]+)~(?![~\w])", re.DOTALL)
-_SIG_TOKEN_RE = re.compile(r"\x00C(\d+)\x00")
-
-# Patterns used to strip inline markdown when rendering table cells as plain
-# text. Defined separately from the styling regexes above because the cell
-# stripper needs a fixed, narrow subset (no single-asterisk italic, no
-# single-tilde strikethrough) and benefits from each pattern's group 1 being
-# the content directly.
-_SIG_CELL_STRIP_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
-    (re.compile(r"\*\*(.+?)\*\*"), r"\1"),
-    (re.compile(r"__(.+?)__"), r"\1"),
-    (re.compile(r"~~(.+?)~~"), r"\1"),
-    (re.compile(r"`([^`]+)`"), r"\1"),
-)
-
-
-def _utf16_len(s: str) -> int:
-    """UTF-16 code-unit length, matching Signal BodyRange semantics."""
-    return len(s.encode("utf-16-le")) // 2
+_SIG_CODE_BLOCK_RE = re.compile(r'```(?:\w+)?\n?([\s\S]*?)```')
+_SIG_INLINE_CODE_RE = re.compile(r'`([^`\n]+)`')
+_SIG_HEADER_RE = re.compile(r'^#{1,6}\s+(.+)$', re.MULTILINE)
+_SIG_BLOCKQUOTE_RE = re.compile(r'^>\s*(.*)$', re.MULTILINE)
+_SIG_BULLET_RE = re.compile(r'^[-*]\s+', re.MULTILINE)
+_SIG_OLIST_RE = re.compile(r'^(\d+)\.\s+', re.MULTILINE)
+_SIG_LINK_RE = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+_SIG_BOLD_RE = re.compile(r'\*\*(.+?)\*\*|__(.+?)__', re.DOTALL)
+_SIG_ITALIC_RE = re.compile(r'(?<!\*)\*([^*\n]+)\*(?!\*)|(?<![a-zA-Z0-9_])_([^_\n]+)_(?![a-zA-Z0-9_])')
+_SIG_STRIKE_RE = re.compile(r'~~(.+?)~~|(?<![~\w])~([^~\n]+)~(?![~\w])', re.DOTALL)
+_SIG_TOKEN_RE = re.compile(r'\x00C(\d+)\x00')
 
 
 def _sig_strip_cell(s: str) -> str:
     """Strip inline markdown from a table cell for plain-text rendering."""
-    for pattern, repl in _SIG_CELL_STRIP_PATTERNS:
-        s = pattern.sub(repl, s)
+    s = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
+    s = re.sub(r'__(.+?)__', r'\1', s)
+    s = re.sub(r'~~(.+?)~~', r'\1', s)
+    s = re.sub(r'`([^`]+)`', r'\1', s)
     return s.strip()
 
 
@@ -76,32 +56,32 @@ def _sig_render_table(table_lines: list[str]) -> str:
     """Render a markdown pipe-table as fixed-width plain text."""
 
     def dw(s: str) -> int:
-        return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
+        return sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1 for c in s)
 
     rows: list[list[str]] = []
     has_sep = False
     for line in table_lines:
-        cells = [_sig_strip_cell(c) for c in line.strip().strip("|").split("|")]
-        if all(re.match(r"^:?-+:?$", c) for c in cells if c):
+        cells = [_sig_strip_cell(c) for c in line.strip().strip('|').split('|')]
+        if all(re.match(r'^:?-+:?$', c) for c in cells if c):
             has_sep = True
             continue
         rows.append(cells)
     if not rows or not has_sep:
-        return "\n".join(table_lines)
+        return '\n'.join(table_lines)
 
     ncols = max(len(r) for r in rows)
     for r in rows:
-        r.extend([""] * (ncols - len(r)))
+        r.extend([''] * (ncols - len(r)))
     widths = [max(dw(r[c]) for r in rows) for c in range(ncols)]
 
     def dr(cells: list[str]) -> str:
-        return "  ".join(f"{c}{' ' * (w - dw(c))}" for c, w in zip(cells, widths))
+        return '  '.join(f'{c}{" " * (w - dw(c))}' for c, w in zip(cells, widths))
 
     out = [dr(rows[0])]
-    out.append("  ".join("─" * w for w in widths))
+    out.append('  '.join('─' * w for w in widths))
     for row in rows[1:]:
         out.append(dr(row))
-    return "\n".join(out)
+    return '\n'.join(out)
 
 
 def _markdown_to_signal(text: str) -> tuple[str, list[str]]:
@@ -124,17 +104,17 @@ def _markdown_to_signal(text: str) -> tuple[str, list[str]]:
     text = _SIG_CODE_BLOCK_RE.sub(save_code, text)
 
     # Detect and render pipe-tables line by line.
-    lines = text.split("\n")
+    lines = text.split('\n')
     rebuilt: list[str] = []
     i = 0
     while i < len(lines):
-        if re.match(r"^\s*\|.+\|", lines[i]):
+        if re.match(r'^\s*\|.+\|', lines[i]):
             tbl: list[str] = []
-            while i < len(lines) and re.match(r"^\s*\|.+\|", lines[i]):
+            while i < len(lines) and re.match(r'^\s*\|.+\|', lines[i]):
                 tbl.append(lines[i])
                 i += 1
             rendered = _sig_render_table(tbl)
-            if rendered != "\n".join(tbl):
+            if rendered != '\n'.join(tbl):
                 protected.append(rendered)
                 rebuilt.append(f"\x00C{len(protected) - 1}\x00")
             else:
@@ -142,15 +122,12 @@ def _markdown_to_signal(text: str) -> tuple[str, list[str]]:
         else:
             rebuilt.append(lines[i])
             i += 1
-    text = "\n".join(rebuilt)
+    text = '\n'.join(rebuilt)
 
     # Phase 2 (run-based): process inline patterns.
     runs: list[_Run] = [_Run(text)]
 
-    def transform(
-        pattern: re.Pattern,
-        make_runs: Callable[[re.Match, frozenset[str]], list[_Run]],
-    ) -> None:
+    def transform(pattern: re.Pattern, make_runs: Any) -> None:
         new_runs: list[_Run] = []
         for run in runs:
             if run.opaque:
@@ -159,7 +136,7 @@ def _markdown_to_signal(text: str) -> tuple[str, list[str]]:
             pos = 0
             for m in pattern.finditer(run.text):
                 if m.start() > pos:
-                    new_runs.append(_Run(run.text[pos : m.start()], run.styles))
+                    new_runs.append(_Run(run.text[pos:m.start()], run.styles))
                 new_runs.extend(make_runs(m, run.styles))
                 pos = m.end()
             if pos < len(run.text):
@@ -167,10 +144,7 @@ def _markdown_to_signal(text: str) -> tuple[str, list[str]]:
         runs[:] = new_runs
 
     # Restore code/table placeholders as opaque MONOSPACE runs.
-    transform(
-        _SIG_TOKEN_RE,
-        lambda m, s: [_Run(protected[int(m.group(1))], s | {"MONOSPACE"}, opaque=True)],
-    )
+    transform(_SIG_TOKEN_RE, lambda m, s: [_Run(protected[int(m.group(1))], s | {"MONOSPACE"}, opaque=True)])
 
     # Inline code (opaque).
     transform(_SIG_INLINE_CODE_RE, lambda m, s: [_Run(m.group(1), s | {"MONOSPACE"}, opaque=True)])
@@ -192,7 +166,7 @@ def _markdown_to_signal(text: str) -> tuple[str, list[str]]:
         link_text, url = m.group(1), m.group(2)
 
         def _norm(u: str) -> str:
-            return re.sub(r"^https?://(www\.)?", "", u).rstrip("/").lower()
+            return re.sub(r'^https?://(www\.)?', '', u).rstrip('/').lower()
 
         if _norm(url) == _norm(link_text):
             return [_Run(url, s)]
@@ -209,72 +183,19 @@ def _markdown_to_signal(text: str) -> tuple[str, list[str]]:
     # Strikethrough: ~~text~~ (standard) or ~text~ (single-tilde variant).
     transform(_SIG_STRIKE_RE, lambda m, s: [_Run(m.group(1) or m.group(2), s | {"STRIKETHROUGH"})])
 
-    # Phase 3: assemble output. Offsets and lengths are emitted in UTF-16 code
-    # units because Signal's BodyRange (via signal-cli's textStyle) interprets
-    # them as such; Python's len() counts code points, which would shift ranges
-    # left by 1 unit per non-BMP character preceding them.
+    # Phase 3: assemble output.
     plain_text = ""
     text_styles: list[str] = []
-    utf16_offset = 0
     for run in runs:
         if not run.text:
             continue
+        start = len(plain_text)
         plain_text += run.text
-        start = utf16_offset
-        length = _utf16_len(run.text)
-        utf16_offset += length
+        length = len(plain_text) - start
         for style in sorted(run.styles):
             text_styles.append(f"{start}:{length}:{style}")
 
     return plain_text, text_styles
-
-
-def _partition_styles(
-    plain_text: str, chunks: list[str], text_styles: list[str]
-) -> list[list[str]]:
-    """Partition Signal textStyle ranges across message chunks.
-
-    ``split_message`` slices ``plain_text`` into pieces (optionally trimming
-    whitespace at the boundaries), but the style ranges produced by
-    ``_markdown_to_signal`` are expressed in UTF-16 offsets relative to the
-    full ``plain_text``. This redistributes them per chunk with offsets
-    rebased to each chunk's start. Ranges that span a boundary are split
-    across the chunks they touch; ranges that fall entirely in trimmed
-    whitespace are dropped.
-    """
-    if not chunks:
-        return []
-    if not text_styles:
-        return [[] for _ in chunks]
-
-    # Locate each chunk's UTF-16 start in plain_text. split_message lstrips at
-    # boundaries (but not before the first chunk), so we skip whitespace
-    # between chunks to mirror that.
-    chunk_ranges: list[tuple[int, int]] = []
-    cursor = 0  # Python codepoint cursor in plain_text
-    for i, chunk in enumerate(chunks):
-        if i > 0:
-            while cursor < len(plain_text) and plain_text[cursor].isspace():
-                cursor += 1
-        utf16_start = _utf16_len(plain_text[:cursor])
-        utf16_end = utf16_start + _utf16_len(chunk)
-        chunk_ranges.append((utf16_start, utf16_end))
-        cursor += len(chunk)
-
-    result: list[list[str]] = [[] for _ in chunks]
-    for entry in text_styles:
-        s, ln, style = entry.split(":", 2)
-        r_start = int(s)
-        r_end = r_start + int(ln)
-        for i, (c_start, c_end) in enumerate(chunk_ranges):
-            if r_end <= c_start or r_start >= c_end:
-                continue
-            new_start = max(r_start, c_start) - c_start
-            new_end = min(r_end, c_end) - c_start
-            new_length = new_end - new_start
-            if new_length > 0:
-                result[i].append(f"{new_start}:{new_length}:{style}")
-    return result
 
 
 class SignalDMConfig(Base):
@@ -302,22 +223,9 @@ class SignalConfig(Base):
     daemon_host: str = "localhost"
     daemon_port: int = 8080
     group_message_buffer_size: int = 20  # Number of recent group messages to keep for context
-    # Override the directory signal-cli writes inbound attachments to. When
-    # None, defaults to ~/.local/share/signal-cli/attachments (the daemon's
-    # platform default on Linux). Set this if the daemon is running with a
-    # custom XDG_DATA_HOME or on macOS/Windows where the default path differs.
-    attachments_dir: str | None = None
     dm: SignalDMConfig = Field(default_factory=SignalDMConfig)
     group: SignalGroupConfig = Field(default_factory=SignalGroupConfig)
 
-    @field_validator("group_message_buffer_size")
-    @classmethod
-    def _validate_buffer_size(cls, v: int) -> int:
-        if v <= 0:
-            raise ValueError("group_message_buffer_size must be > 0")
-        return v
-
-    @computed_field  # type: ignore[prop-decorator]
     @property
     def allow_from(self) -> list[str]:
         """Aggregate allowlist for the base-class is_allowed() check.
@@ -343,7 +251,6 @@ class SignalChannel(BaseChannel):
     display_name = "Signal"
     _TYPING_REFRESH_SECONDS = 10.0
     _MAX_MESSAGE_LEN = 64_000  # signal-cli practical limit (protocol max ~64 KB)
-    _HTTP_TIMEOUT_SECONDS = 60.0
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -366,76 +273,10 @@ class SignalChannel(BaseChannel):
         # Each message is a dict with: sender_name, sender_number, content, timestamp
         self._group_buffers: dict[str, deque] = {}
 
-    def is_allowed(self, sender_id: str) -> bool:
-        """Override base check to normalize and split pipe-joined identifiers.
-
-        ``sender_id`` from Signal is the pipe-joined composite produced by
-        ``_collect_sender_id_parts``; allow_from entries may be single
-        identifiers or composites and may use the ``+`` prefix variant or
-        not. Delegates to ``_sender_matches_allowlist`` so the base gate
-        matches the per-policy DM gate.
-        """
-        allow_list = self.config.allow_from
-        if "*" in allow_list:
-            return True
-        if self._sender_matches_allowlist(sender_id, allow_list):
-            return True
-        if self._sender_approved_via_pairing(sender_id):
-            return True
-        if not allow_list:
-            self.logger.warning("allow_from is empty — all access denied")
-        return False
-
-    def _sender_approved_via_pairing(self, sender_id: str) -> bool:
-        """Return True if any normalized variant of sender_id is in the pairing store.
-
-        Pairing approval may be recorded under any of the identifier forms
-        signal exposes (phone with/without ``+``, UUID, ACI), so we check
-        each part of the pipe-joined composite against ``is_approved``.
-        """
-        for part in str(sender_id).split("|"):
-            for variant in self._normalize_signal_id(part):
-                if is_approved(self.name, variant):
-                    return True
-        return False
-
-    async def _handle_message(
-        self,
-        sender_id: str,
-        chat_id: str,
-        content: str,
-        media: list[str] | None = None,
-        metadata: dict[str, Any] | None = None,
-        session_key: str | None = None,
-        is_dm: bool = False,
-    ) -> None:
-        """Handle an inbound message whose policy has already been checked.
-
-        ``_check_inbound_policy`` is the authoritative gate for DM/group
-        access, so we skip the base-class ``is_allowed()`` check and publish
-        directly to the bus.  The denied-DM pairing path calls
-        ``super()._handle_message`` instead, which goes through
-        ``is_allowed`` and issues a pairing code.
-        """
-        meta = metadata or {}
-        if self.supports_streaming:
-            meta = {**meta, "_wants_stream": True}
-        await self.bus.publish_inbound(
-            InboundMessage(
-                channel=self.name,
-                sender_id=str(sender_id),
-                chat_id=str(chat_id),
-                content=content,
-                media=media or [],
-                metadata=meta,
-                session_key_override=session_key,
-            )
-        )
-
     async def start(self) -> None:
         """Start the Signal channel and connect to signal-cli daemon."""
         if not self.config.phone_number:
-            self.logger.error("Signal account not configured")
+            self.self.logger.error("Signal account not configured")
             return
 
         self._running = True
@@ -449,12 +290,10 @@ class SignalChannel(BaseChannel):
 
         while self._running:
             try:
-                self.logger.info("Connecting to signal-cli daemon at {}...", base_url)
+                self.logger.info(f"Connecting to signal-cli daemon at {base_url}...")
 
                 # Create HTTP client
-                self._http = httpx.AsyncClient(
-                    timeout=self._HTTP_TIMEOUT_SECONDS, base_url=base_url
-                )
+                self._http = httpx.AsyncClient(timeout=60.0, base_url=base_url)
 
                 # Test connection
                 try:
@@ -485,15 +324,11 @@ class SignalChannel(BaseChannel):
                 break
             except ConnectionRefusedError as e:
                 self.logger.error(
-                    "{}. Make sure signal-cli daemon is running: "
-                    "signal-cli -a {} daemon --http {}:{}",
-                    e,
-                    self.config.phone_number,
-                    self.config.daemon_host,
-                    self.config.daemon_port,
+                    f"{e}. Make sure signal-cli daemon is running: "
+                    f"signal-cli -a {self.config.phone_number} daemon --http {self.config.daemon_host}:{self.config.daemon_port}"
                 )
             except Exception as e:
-                self.logger.error("Signal channel error: {}", e)
+                self.logger.error(f"Signal channel error: {e}")
             finally:
                 if self._sse_task:
                     if not self._sse_task.done():
@@ -511,7 +346,7 @@ class SignalChannel(BaseChannel):
 
             if self._running:
                 self.logger.info(
-                    "Reconnecting to signal-cli daemon in {:.0f} seconds...", reconnect_delay_s
+                    f"Reconnecting to signal-cli daemon in {reconnect_delay_s:.0f} seconds..."
                 )
                 await asyncio.sleep(reconnect_delay_s)
                 reconnect_delay_s = min(reconnect_delay_s * 2, max_reconnect_delay_s)
@@ -547,11 +382,10 @@ class SignalChannel(BaseChannel):
             recipient_params = self._recipient_params(msg.chat_id)
 
             chunks = split_message(plain_text, self._MAX_MESSAGE_LEN) if plain_text else [""]
-            chunk_styles = _partition_styles(plain_text, chunks, text_styles)
             for i, chunk in enumerate(chunks):
                 params: dict[str, Any] = {"message": chunk}
-                if chunk_styles[i]:
-                    params["textStyle"] = chunk_styles[i]
+                if text_styles and i == 0:
+                    params["textStyle"] = text_styles
                 params.update(recipient_params)
                 if msg.media and i == 0:
                     params["attachments"] = msg.media
@@ -559,8 +393,7 @@ class SignalChannel(BaseChannel):
                 response = await self._send_request("send", params)
 
                 if "error" in response:
-                    self.logger.error("Error sending Signal message: {}", response['error'])
-                    raise RuntimeError(f"signal-cli send failed: {response['error']}")
+                    self.logger.error(f"Error sending Signal message: {response['error']}")
                 else:
                     self.logger.debug(
                         f"Signal message sent, timestamp: {response.get('result', {}).get('timestamp')}"
@@ -601,7 +434,7 @@ class SignalChannel(BaseChannel):
 
                     # Debug: log raw SSE lines (except keepalive pings)
                     if line and line != ":":
-                        self.logger.debug("SSE line received: {}", line[:200])
+                        self.logger.debug(f"SSE line received: {line[:200]}")
 
                     # SSE format handling
                     if isinstance(line, str):
@@ -611,23 +444,20 @@ class SignalChannel(BaseChannel):
                                 # Try to parse the accumulated data
                                 data_str = ""
                                 try:
-                                    data_str = "\n".join(event_buffer)
+                                    data_str = "".join(event_buffer)
                                     data = json.loads(data_str)
-                                    self.logger.debug("SSE event parsed: {}", data)
+                                    self.logger.debug(f"SSE event parsed: {data}")
                                     await self._handle_receive_notification(data)
                                 except json.JSONDecodeError as e:
                                     self.logger.warning(
-                                        "Invalid JSON in SSE buffer: {}, data: {}",
-                                        e,
-                                        data_str[:200],
+                                        f"Invalid JSON in SSE buffer: {e}, data: {data_str[:200]}"
                                     )
                                 finally:
                                     event_buffer = []
 
                         # "data:" line - accumulate it
                         elif line.startswith("data:"):
-                            # SSE spec: strip one optional leading space after "data:".
-                            event_buffer.append(line[6:] if line[5:6] == " " else line[5:])
+                            event_buffer.append(line[5:])  # Skip "data:" prefix
 
                         # "event:" line - just log it (we only care about data)
                         elif line.startswith("event:"):
@@ -640,34 +470,17 @@ class SignalChannel(BaseChannel):
             self.logger.info("SSE receive loop cancelled")
             raise
         except Exception as e:
-            self.logger.error("Error in SSE receive loop: {}", e)
+            self.logger.error(f"Error in SSE receive loop: {e}")
             raise
-
-    @asynccontextmanager
-    async def _safe_handle(self, action: str, payload: Any = None) -> AsyncIterator[None]:
-        """Swallow and log any exception from a top-level handler block.
-
-        Logs `self.logger.error` with the action name, the exception, and a
-        bounded ``repr`` of the offending payload so the offending input is
-        recoverable from logs without having to correlate by timestamp.
-        """
-        try:
-            yield
-        except Exception as e:
-            snippet = repr(payload)[:200] if payload is not None else ""
-            text = f"Error in {action}: {e}"
-            if snippet:
-                text += f" | payload={snippet}"
-            self.logger.opt(exception=True).error(text)
 
     async def _handle_receive_notification(self, params: dict[str, Any]) -> None:
         """Handle incoming message notification from signal-cli."""
-        self.logger.debug("_handle_receive_notification called with: {}", params)
-        async with self._safe_handle("receive notification", params):
+        self.logger.debug(f"_handle_receive_notification called with: {params}")
+        try:
             # Extract envelope from SSE notification: {"envelope": {...}}
             envelope = params.get("envelope", {})
 
-            self.logger.debug("Extracted envelope: {}", envelope)
+            self.logger.debug(f"Extracted envelope: {envelope}")
 
             if not envelope:
                 self.logger.debug("No envelope found in params")
@@ -709,12 +522,15 @@ class SignalChannel(BaseChannel):
                 destination = sent_msg.get("destination") or sent_msg.get("destinationNumber")
                 if destination:
                     self.logger.debug(
-                        "Sync message sent to {}: {}", destination, sent_msg.get("message", "")[:50]
+                        f"Sync message sent to {destination}: {sent_msg.get('message', '')[:50]}"
                     )
 
             # Handle typing indicators (silently ignore)
             elif typing_message:
                 pass  # Ignore typing indicators
+
+        except Exception as e:
+            self.logger.error(f"Error handling receive notification: {e}")
 
     async def _handle_data_message(
         self,
@@ -726,68 +542,147 @@ class SignalChannel(BaseChannel):
         """Handle a data message (text, attachments, etc.)."""
         message_text = data_message.get("message") or ""
         attachments = data_message.get("attachments", [])
-        mentions = data_message.get("mentions", [])
+        group_info = data_message.get("groupInfo")
         timestamp = data_message.get("timestamp")
+        mentions = data_message.get("mentions", [])
+        reaction = data_message.get("reaction")
 
+        # Log full data_message for debugging group detection
         self.logger.info(
-            "Data message from {}: groupInfo={}, groupV2={}, keys={}",
-            sender_number,
-            data_message.get("groupInfo"),
-            data_message.get("groupV2"),
-            list(data_message.keys()),
+            f"Data message from {sender_number}: "
+            f"groupInfo={group_info}, "
+            f"groupV2={data_message.get('groupV2')}, "
+            f"keys={list(data_message.keys())}"
         )
 
-        if data_message.get("reaction"):
-            self.logger.debug(
-                "Ignoring reaction message from {}: {}", sender_number, data_message["reaction"]
-            )
-            return
-        if not message_text and not attachments:
-            self.logger.debug("Ignoring empty message from {}", sender_number)
+        # Ignore reaction messages (emoji reactions to messages)
+        if reaction:
+            self.logger.debug(f"Ignoring reaction message from {sender_number}: {reaction}")
             return
 
-        group_info = data_message.get("groupInfo")
+        # Ignore empty messages (e.g., when bot is added to a group)
+        if not message_text and not attachments:
+            self.logger.debug(f"Ignoring empty message from {sender_number}")
+            return
+
+        # Determine chat_id (group ID or sender number)
+        # Check both groupInfo (v1) and groupV2 (v2) fields for group detection
         group_v2 = data_message.get("groupV2")
         is_group_message = group_info is not None or group_v2 is not None
         group_id = self._extract_group_id(group_info, group_v2)
 
-        allowed, chat_id = self._check_inbound_policy(
-            sender_id=sender_id,
-            sender_number=sender_number,
-            group_id=group_id,
-            is_group_message=is_group_message,
-            message_text=message_text,
-            mentions=mentions,
-            sender_name=sender_name,
-            timestamp=timestamp,
-        )
-        if not allowed:
-            # Mirror Slack: let denied DMs reach the base-class
-            # _handle_message so it can reply with a pairing code.
-            # Group denials stay dropped.
-            if not is_group_message and self.config.dm.enabled:
-                await super()._handle_message(
-                    sender_id=sender_id,
-                    chat_id=chat_id,
-                    content="",
-                    is_dm=True,
+        is_command = bool(message_text and message_text.strip().startswith("/"))
+
+        if is_group_message:
+            chat_id = group_id or sender_number
+
+            # Check if this group is allowed before doing anything else
+            if not self.config.group.enabled:
+                self.logger.info(f"Ignoring group message from {chat_id} (groups disabled)")
+                return
+            if (
+                self.config.group.policy == "allowlist"
+                and chat_id not in self.config.group.allow_from
+            ):
+                self.logger.info(
+                    f"Ignoring group message from {chat_id} (policy: {self.config.group.policy})"
                 )
-            return
+                return
 
-        content, media_paths = self._assemble_inbound_content(
-            sender_name=sender_name,
-            sender_number=sender_number,
-            message_text=message_text,
-            attachments=attachments,
-            mentions=mentions,
-            is_group_message=is_group_message,
-            chat_id=chat_id,
-        )
+            # Add to group message buffer (group is allowed)
+            self._add_to_group_buffer(
+                group_id=chat_id,
+                sender_name=sender_name or sender_number,
+                sender_number=sender_number,
+                message_text=message_text,
+                timestamp=timestamp,
+            )
 
-        self.logger.debug("Signal message from {}: {}...", sender_number, content[:50])
+            # Commands bypass the mention requirement; non-commands require it.
+            if not is_command and not self._should_respond_in_group(message_text, mentions):
+                self.logger.info(
+                    f"Ignoring group message (require_mention: {self.config.group.require_mention})"
+                )
+                return
+        else:
+            # Direct message — check policy first, then forward everything to the bus.
+            chat_id = sender_number
+            if not self.config.dm.enabled:
+                self.logger.debug(f"Ignoring DM from {sender_id} (DMs disabled)")
+                return
+            if self.config.dm.policy == "allowlist":
+                allow_list = self.config.dm.allow_from
+                sender_str = str(sender_id)
+                parts = [sender_str] + (sender_str.split("|") if "|" in sender_str else [])
+                if not any(p for p in parts if p in allow_list):
+                    self.logger.debug(f"Ignoring DM from {sender_id} (policy: {self.config.dm.policy})")
+                    return
+
+        # Build content from text and attachments
+        content_parts = []
+        media_paths = []
+
+        # For group messages, include recent message context
+        if is_group_message:
+            buffer_context = self._get_group_buffer_context(chat_id)
+            if buffer_context:
+                content_parts.append(f"[Recent group messages for context:]\n{buffer_context}\n---")
+
+        # Prepend sender name for group messages so history shows who said what
+        if message_text:
+            # Strip bot mentions from text (for group messages)
+            if is_group_message:
+                message_text = self._strip_bot_mention(message_text, mentions)
+                # Prepend sender name to make it clear who is speaking
+                display_name = sender_name or sender_number
+                message_text = f"[{display_name}]: {message_text}"
+            content_parts.append(message_text)
+
+        # Handle attachments
+        if attachments:
+            media_dir = get_media_dir("signal")
+
+            for attachment in attachments:
+                attachment_id = attachment.get("id")
+                content_type = attachment.get("contentType", "")
+                filename = attachment.get("filename") or f"attachment_{attachment_id}"
+
+                if not attachment_id:
+                    continue
+
+                try:
+                    # signal-cli stores attachments in ~/.local/share/signal-cli/attachments/
+                    source_path = (
+                        Path.home() / ".local/share/signal-cli/attachments" / attachment_id
+                    )
+
+                    if source_path.exists():
+                        dest_path = media_dir / f"signal_{safe_filename(filename)}"
+                        shutil.copy2(source_path, dest_path)
+                        media_paths.append(str(dest_path))
+
+                        # Determine media type from content type
+                        media_type = content_type.split("/")[0] if "/" in content_type else "file"
+                        if media_type not in ("image", "audio", "video"):
+                            media_type = "file"
+
+                        content_parts.append(f"[{media_type}: {dest_path}]")
+                        self.logger.debug(f"Downloaded attachment: {filename} -> {dest_path}")
+                    else:
+                        self.logger.warning(f"Attachment not found: {source_path}")
+                        content_parts.append(f"[attachment: {filename} - not found]")
+
+                except Exception as e:
+                    self.logger.warning(f"Failed to process attachment {filename}: {e}")
+                    content_parts.append(f"[attachment: {filename} - error]")
+
+        content = "\n".join(content_parts) if content_parts else "[empty message]"
+
+        self.logger.debug(f"Signal message from {sender_number}: {content[:50]}...")
 
         await self._start_typing(chat_id)
         try:
+            # Forward to message bus
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=chat_id,
@@ -800,136 +695,10 @@ class SignalChannel(BaseChannel):
                     "is_group": is_group_message,
                     "group_id": group_id,
                 },
-                is_dm=not is_group_message,
             )
         except Exception:
             await self._stop_typing(chat_id)
             raise
-
-    def _check_inbound_policy(
-        self,
-        *,
-        sender_id: str,
-        sender_number: str,
-        group_id: str | None,
-        is_group_message: bool,
-        message_text: str,
-        mentions: list,
-        sender_name: str | None,
-        timestamp: int | None,
-    ) -> tuple[bool, str]:
-        """Decide whether to route an inbound message past DM/group policy.
-
-        Returns ``(allow, chat_id)``. Has one side effect: when a group
-        message passes the enabled+allowlist gates, it is appended to the
-        group's rolling context buffer before the mention check.
-        """
-        if is_group_message:
-            chat_id = group_id or sender_number
-            if not self.config.group.enabled:
-                self.logger.info("Ignoring group message from {} (groups disabled)", chat_id)
-                return False, chat_id
-            if (
-                self.config.group.policy == "allowlist"
-                and chat_id not in self.config.group.allow_from
-            ):
-                self.logger.info(
-                    "Ignoring group message from {} (policy: {})",
-                    chat_id,
-                    self.config.group.policy,
-                )
-                return False, chat_id
-
-            self._add_to_group_buffer(
-                group_id=chat_id,
-                sender_name=sender_name or sender_number,
-                sender_number=sender_number,
-                message_text=message_text,
-                timestamp=timestamp,
-            )
-
-            is_command = bool(message_text and message_text.strip().startswith("/"))
-            if not is_command and not self._should_respond_in_group(message_text, mentions):
-                self.logger.info(
-                    "Ignoring group message (require_mention: {})",
-                    self.config.group.require_mention,
-                )
-                return False, chat_id
-            return True, chat_id
-
-        # Direct message
-        chat_id = sender_number
-        if not self.config.dm.enabled:
-            self.logger.debug("Ignoring DM from {} (DMs disabled)", sender_id)
-            return False, chat_id
-        if self.config.dm.policy == "allowlist":
-            if not self._sender_matches_allowlist(sender_id, self.config.dm.allow_from):
-                self.logger.debug(
-                    "Ignoring DM from {} (policy: {})", sender_id, self.config.dm.policy
-                )
-                return False, chat_id
-        return True, chat_id
-
-    def _assemble_inbound_content(
-        self,
-        *,
-        sender_name: str | None,
-        sender_number: str,
-        message_text: str,
-        attachments: list,
-        mentions: list,
-        is_group_message: bool,
-        chat_id: str,
-    ) -> tuple[str, list[str]]:
-        """Build ``(content, media_paths)`` for an inbound message.
-
-        Pulls in group context, strips bot mentions, prefixes the sender's
-        display name on group messages, and copies any attachments from
-        signal-cli's storage into the channel media dir.
-        """
-        content_parts: list[str] = []
-        media_paths: list[str] = []
-
-        if is_group_message:
-            buffer_context = self._get_group_buffer_context(chat_id)
-            if buffer_context:
-                content_parts.append(f"[Recent group messages for context:]\n{buffer_context}\n---")
-
-        if message_text:
-            if is_group_message:
-                message_text = self._strip_bot_mention(message_text, mentions)
-                display_name = sender_name or sender_number
-                message_text = f"[{display_name}]: {message_text}"
-            content_parts.append(message_text)
-
-        if attachments:
-            media_dir = get_media_dir("signal")
-            for attachment in attachments:
-                attachment_id = attachment.get("id")
-                content_type = attachment.get("contentType", "")
-                filename = attachment.get("filename") or f"attachment_{attachment_id}"
-                if not attachment_id:
-                    continue
-                try:
-                    source_path = self._signal_attachments_dir() / attachment_id
-                    if source_path.exists():
-                        dest_path = media_dir / f"signal_{safe_filename(filename)}"
-                        shutil.copy2(source_path, dest_path)
-                        media_paths.append(str(dest_path))
-                        media_type = content_type.split("/")[0] if "/" in content_type else "file"
-                        if media_type not in ("image", "audio", "video"):
-                            media_type = "file"
-                        content_parts.append(f"[{media_type}: {dest_path}]")
-                        self.logger.debug("Downloaded attachment: {} -> {}", filename, dest_path)
-                    else:
-                        self.logger.warning("Attachment not found: {}", source_path)
-                        content_parts.append(f"[attachment: {filename} - not found]")
-                except Exception as e:
-                    self.logger.warning("Failed to process attachment {}: {}", filename, e)
-                    content_parts.append(f"[attachment: {filename} - error]")
-
-        content = "\n".join(content_parts) if content_parts else "[empty message]"
-        return content, media_paths
 
     def _add_to_group_buffer(
         self,
@@ -949,6 +718,9 @@ class SignalChannel(BaseChannel):
             message_text: The message content
             timestamp: Message timestamp
         """
+        if self.config.group_message_buffer_size <= 0:
+            return
+
         # Create buffer for this group if it doesn't exist
         if group_id not in self._group_buffers:
             self._group_buffers[group_id] = deque(maxlen=self.config.group_message_buffer_size)
@@ -964,10 +736,8 @@ class SignalChannel(BaseChannel):
         )
 
         self.logger.debug(
-            "Added message to group buffer {}: {}/{}",
-            group_id,
-            len(self._group_buffers[group_id]),
-            self.config.group_message_buffer_size,
+            f"Added message to group buffer {group_id}: "
+            f"{len(self._group_buffers[group_id])}/{self.config.group_message_buffer_size}"
         )
 
     def _get_group_buffer_context(self, group_id: str) -> str:
@@ -999,17 +769,6 @@ class SignalChannel(BaseChannel):
 
         return "\n".join(lines)
 
-    def _signal_attachments_dir(self) -> Path:
-        """Return the directory signal-cli writes inbound attachments to.
-
-        Defaults to ``~/.local/share/signal-cli/attachments`` (the daemon's
-        platform default on Linux) when ``config.attachments_dir`` is unset.
-        """
-        configured = self.config.attachments_dir
-        if configured:
-            return Path(configured).expanduser()
-        return Path.home() / ".local/share/signal-cli/attachments"
-
     @staticmethod
     def _normalize_signal_id(value: str) -> list[str]:
         """Normalize Signal identifiers (phone/uuid/service-id) for matching."""
@@ -1023,30 +782,6 @@ class SignalChannel(BaseChannel):
         elif raw.isdigit():
             normalized.append(f"+{raw}")
         return list(dict.fromkeys(normalized))
-
-    @classmethod
-    def _sender_matches_allowlist(cls, sender_id: str, allow_list: list[str]) -> bool:
-        """Return True if any normalized variant of sender_id is on allow_list.
-
-        Both ``sender_id`` and each allow_list entry can be a single
-        identifier or a pipe-joined composite of several (e.g.
-        ``"+1234567890|uuid-abc"``); both sides are split on ``|`` and each
-        part is run through ``_normalize_signal_id`` so an allowlist entry
-        like ``1234567890`` matches a sender ``+1234567890`` (and vice
-        versa), and case-only differences in UUIDs/ACIs match too.
-        """
-        if not allow_list:
-            return False
-        sender_variants: set[str] = set()
-        for part in str(sender_id).split("|"):
-            sender_variants.update(cls._normalize_signal_id(part))
-        if not sender_variants:
-            return False
-        allow_variants: set[str] = set()
-        for entry in allow_list:
-            for part in str(entry).split("|"):
-                allow_variants.update(cls._normalize_signal_id(part))
-        return bool(sender_variants & allow_variants)
 
     def _remember_account_id_alias(self, value: str | None) -> None:
         """Remember known bot identifiers for mention matching."""
@@ -1112,7 +847,7 @@ class SignalChannel(BaseChannel):
         """Extract possible identifier fields from a mention payload."""
         ids: list[str] = []
 
-        def _walk(value: dict[str, Any] | Any, depth: int = 0) -> None:
+        def _walk(value: Any, depth: int = 0) -> None:
             if depth > 2:
                 return
             if not isinstance(value, dict):
@@ -1318,7 +1053,7 @@ class SignalChannel(BaseChannel):
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            self.logger.debug("Typing indicator loop stopped for {}: {}", chat_id, e)
+            self.logger.debug(f"Typing indicator loop stopped for {chat_id}: {e}")
 
     async def _send_typing(
         self, chat_id: str, stop: bool = False, quiet_success: bool = False
@@ -1353,22 +1088,18 @@ class SignalChannel(BaseChannel):
 
             if "error" not in response:
                 if not quiet_success:
-                    self.logger.info("Signal typing {} sent for {}", action, chat_id)
+                    self.logger.info(f"Signal typing {action} sent for {chat_id}")
                 return
 
             last_error = response["error"]
 
-        self.logger.warning(
-            "Failed to send Signal typing {} for {}: {}", action, chat_id, last_error
-        )
+        self.logger.warning(f"Failed to send Signal typing {action} for {chat_id}: {last_error}")
 
     async def _ensure_typing_indicators_enabled(self) -> None:
         """Enable typing indicators on the bot account."""
         response = await self._send_request("updateConfiguration", {"typingIndicators": True})
         if "error" in response:
-            self.logger.warning(
-                "Failed to enable Signal typing indicators: {}", response["error"]
-            )
+            self.logger.warning(f"Failed to enable Signal typing indicators: {response['error']}")
         else:
             self.logger.info("Signal typing indicators enabled on account configuration")
 
@@ -1398,5 +1129,5 @@ class SignalChannel(BaseChannel):
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            self.logger.error("HTTP request failed: {}", e)
+            self.logger.error(f"HTTP request failed: {e}")
             return {"error": {"message": str(e)}}

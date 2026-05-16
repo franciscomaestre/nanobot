@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
-from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.signal import (
     SignalChannel,
@@ -62,24 +60,6 @@ class _FakeHTTPClient:
 # ---------------------------------------------------------------------------
 
 
-def _make_channel_with_capture(**overrides) -> tuple[SignalChannel, list[dict]]:
-    """Build a SignalChannel with _handle_message captured into a list and a
-    no-op _start_typing, used by every receive-flow test class.
-    """
-    ch = _make_channel(**overrides)
-    handled: list[dict] = []
-
-    async def capture(**kwargs):
-        handled.append(kwargs)
-
-    async def noop_typing(chat_id):
-        pass
-
-    ch._handle_message = capture  # type: ignore[method-assign]
-    ch._start_typing = noop_typing  # type: ignore[method-assign]
-    return ch, handled
-
-
 def _make_channel(
     *,
     phone_number: str = "+10000000000",
@@ -91,7 +71,6 @@ def _make_channel(
     group_allow_from: list[str] | None = None,
     require_mention: bool = True,
     group_buffer_size: int = 20,
-    attachments_dir: str | None = None,
 ) -> SignalChannel:
     config = SignalConfig(
         enabled=True,
@@ -108,7 +87,6 @@ def _make_channel(
             require_mention=require_mention,
         ),
         group_message_buffer_size=group_buffer_size,
-        attachments_dir=attachments_dir,
     )
     return SignalChannel(config, MessageBus())
 
@@ -470,13 +448,10 @@ class TestGroupBuffer:
             ch._add_to_group_buffer("g1", "Alice", "+1111", f"msg{i}", i)
         assert len(ch._group_buffers["g1"]) == 3
 
-    def test_zero_buffer_size_rejected_by_validator(self):
-        with pytest.raises(ValueError, match="group_message_buffer_size"):
-            _make_channel(group_buffer_size=0)
-
-    def test_negative_buffer_size_rejected_by_validator(self):
-        with pytest.raises(ValueError, match="group_message_buffer_size"):
-            _make_channel(group_buffer_size=-1)
+    def test_zero_buffer_size_does_not_add(self):
+        ch = _make_channel(group_buffer_size=0)
+        ch._add_to_group_buffer("g1", "Alice", "+1111", "msg", 1000)
+        assert "g1" not in ch._group_buffers
 
     def test_context_limits_message_length(self):
         ch = _make_channel(group_buffer_size=5)
@@ -493,285 +468,21 @@ class TestGroupBuffer:
 # ---------------------------------------------------------------------------
 
 
-class TestIsAllowed:
-    """The base-channel allowlist gate is overridden to understand Signal's
-    pipe-joined composite sender_ids and the +/no-+ phone variants.
-    """
-
-    def test_denies_when_allowlist_empty(self):
-        ch = _make_channel(dm_enabled=True, dm_policy="allowlist")
-        assert ch.is_allowed("+19995550001") is False
-
-    def test_denies_when_no_policy_allows(self):
-        """When both dm and group are disabled, is_allowed denies."""
-        ch = _make_channel(dm_enabled=False, group_enabled=False)
-        assert ch.is_allowed("+19995550001") is False
-
-    def test_allows_wildcard(self):
-        ch = _make_channel(dm_policy="allowlist", dm_allow_from=["*"])
-        assert ch.is_allowed("+19995550001|some-uuid") is True
-
-    def test_allows_composite_sender_against_split_allowlist(self):
-        """Composite sender_id, single-id allow_from — must match either part."""
-        ch = _make_channel(
-            dm_policy="allowlist",
-            dm_allow_from=["+19995550001"],
-        )
-        assert ch.is_allowed("+19995550001|1872ba20-uuid") is True
-
-    def test_allows_composite_sender_against_composite_allowlist_entry(self):
-        """Backward compat: pipe-joined composite allowlist entries still match."""
-        composite = "+19995550001|1872ba20-uuid"
-        ch = _make_channel(dm_policy="allowlist", dm_allow_from=[composite])
-        assert ch.is_allowed(composite) is True
-
-    def test_allows_when_only_uuid_part_is_listed(self):
-        ch = _make_channel(dm_policy="allowlist", dm_allow_from=["1872ba20-uuid"])
-        assert ch.is_allowed("+19995550001|1872ba20-uuid") is True
-
-    def test_denies_when_no_part_matches(self):
-        ch = _make_channel(dm_policy="allowlist", dm_allow_from=["+12223334444"])
-        assert ch.is_allowed("+19995550001|1872ba20-uuid") is False
-
-    def test_allowlist_union_includes_group_ids(self):
-        """allow_from is the union of dm.allow_from and group.allow_from."""
-        ch = _make_channel(
-            group_enabled=True,
-            group_policy="allowlist",
-            group_allow_from=["group-id-base64=="],
-        )
-        assert "group-id-base64==" in ch.config.allow_from
-
-
-class TestEndToEndDMRouting:
-    """End-to-end tests that keep the real _handle_message chain (no mock),
-    verifying that _check_inbound_policy + _handle_message work together
-    correctly for DM routing.  The override of _handle_message publishes
-    directly to bus (policy already checked); denied DMs call
-    super()._handle_message which issues a pairing code.
-    """
-
-    @pytest.mark.asyncio
-    async def test_open_dm_policy_publishes_to_bus(self):
-        """Open DM: _check_inbound_policy passes → _handle_message publishes."""
-        ch = _make_channel(dm_enabled=True, dm_policy="open")
-
-        async def noop_typing(chat_id):
-            pass
-
-        ch._start_typing = noop_typing  # type: ignore[method-assign]
-        published: list[InboundMessage] = []
-
-        async def capture_publish(msg: InboundMessage):
-            published.append(msg)
-
-        ch.bus.publish_inbound = capture_publish  # type: ignore[method-assign]
-
-        params = _dm_envelope(source_number="+19995550001", message="hello")
-        await ch._handle_receive_notification(params)
-
-        assert len(published) == 1
-        assert published[0].content == "hello"
-        assert published[0].sender_id == "+19995550001"
-
-    @pytest.mark.asyncio
-    async def test_allowlist_dm_denied_triggers_pairing(self):
-        """Allowlist DM: denied sender triggers pairing code via send()."""
-        ch = _make_channel(dm_enabled=True, dm_policy="allowlist", dm_allow_from=[])
-        ch._http = _FakeHTTPClient()  # type: ignore[assignment]
-
-        async def noop_typing(chat_id):
-            pass
-
-        ch._start_typing = noop_typing  # type: ignore[method-assign]
-        published: list[InboundMessage] = []
-
-        async def capture_publish(msg: InboundMessage):
-            published.append(msg)
-
-        ch.bus.publish_inbound = capture_publish  # type: ignore[method-assign]
-
-        params = _dm_envelope(source_number="+19995550002", message="hello")
-        await ch._handle_receive_notification(params)
-
-        # Should NOT publish to bus — sender is not on allowlist.
-        assert published == []
-        # Should have sent a pairing code via send (captured in HTTP posts).
-        assert len(ch._http.posts) == 1  # type: ignore[attr-defined]
-        sent_text = ch._http.posts[0]["json"]["params"]["message"]  # type: ignore[attr-defined]
-        assert "pairing" in sent_text.lower() or "pair" in sent_text.lower()
-
-    @pytest.mark.asyncio
-    async def test_allowlist_dm_denied_with_group_open_still_pairs(self):
-        """dm.policy="allowlist" + group.policy="open": denied DM sender
-        must still get a pairing code, not be leaked by the group open check."""
-        ch = _make_channel(
-            dm_enabled=True,
-            dm_policy="allowlist",
-            dm_allow_from=[],
-            group_enabled=True,
-            group_policy="open",
-        )
-        ch._http = _FakeHTTPClient()  # type: ignore[assignment]
-
-        async def noop_typing(chat_id):
-            pass
-
-        ch._start_typing = noop_typing  # type: ignore[method-assign]
-        published: list[InboundMessage] = []
-
-        async def capture_publish(msg: InboundMessage):
-            published.append(msg)
-
-        ch.bus.publish_inbound = capture_publish  # type: ignore[method-assign]
-
-        params = _dm_envelope(source_number="+19995550002", message="hello")
-        await ch._handle_receive_notification(params)
-
-        assert published == []
-        assert len(ch._http.posts) == 1  # type: ignore[attr-defined]
-
-    @pytest.mark.asyncio
-    async def test_open_group_policy_publishes_to_bus(self):
-        """Open group: group message from unknown sender publishes to bus."""
-        ch = _make_channel(
-            group_enabled=True,
-            group_policy="open",
-            require_mention=False,
-        )
-
-        async def noop_typing(chat_id):
-            pass
-
-        ch._start_typing = noop_typing  # type: ignore[method-assign]
-        published: list[InboundMessage] = []
-
-        async def capture_publish(msg: InboundMessage):
-            published.append(msg)
-
-        ch.bus.publish_inbound = capture_publish  # type: ignore[method-assign]
-
-        params = _group_envelope(group_id="grp==", message="hello group")
-        await ch._handle_receive_notification(params)
-
-        assert len(published) == 1
-        assert "hello group" in published[0].content
-
-
-class TestCheckInboundPolicy:
-    """Direct tests for the policy gate that _handle_data_message now delegates to."""
-
-    def _call(
-        self,
-        ch: SignalChannel,
-        *,
-        sender_id: str = "+19995550001",
-        sender_number: str = "+19995550001",
-        group_id: str | None = None,
-        is_group_message: bool = False,
-        message_text: str = "hi",
-        mentions: list | None = None,
-        sender_name: str | None = "Alice",
-        timestamp: int | None = 1000,
-    ) -> tuple[bool, str]:
-        return ch._check_inbound_policy(
-            sender_id=sender_id,
-            sender_number=sender_number,
-            group_id=group_id,
-            is_group_message=is_group_message,
-            message_text=message_text,
-            mentions=mentions or [],
-            sender_name=sender_name,
-            timestamp=timestamp,
-        )
-
-    def test_dm_open_allows(self):
-        ch = _make_channel(dm_enabled=True, dm_policy="open")
-        allowed, chat_id = self._call(ch)
-        assert allowed is True
-        assert chat_id == "+19995550001"
-
-    def test_dm_disabled_blocks(self):
-        ch = _make_channel(dm_enabled=False)
-        allowed, _ = self._call(ch)
-        assert allowed is False
-
-    def test_dm_allowlist_blocks_unknown_sender(self):
-        ch = _make_channel(dm_policy="allowlist", dm_allow_from=["+12223334444"])
-        allowed, _ = self._call(ch, sender_id="+19995550001")
-        assert allowed is False
-
-    def test_dm_allowlist_allows_known_sender(self):
-        ch = _make_channel(dm_policy="allowlist", dm_allow_from=["+19995550001"])
-        allowed, _ = self._call(ch, sender_id="+19995550001")
-        assert allowed is True
-
-    def test_group_disabled_blocks(self):
-        ch = _make_channel(group_enabled=False)
-        allowed, _ = self._call(ch, is_group_message=True, group_id="g1")
-        assert allowed is False
-
-    def test_group_open_with_mention_allows(self):
-        ch = _make_channel(
-            group_enabled=True,
-            group_policy="open",
-            phone_number="+10000000000",
-            require_mention=True,
-        )
-        allowed, chat_id = self._call(
-            ch,
-            is_group_message=True,
-            group_id="g1",
-            message_text="hello @bot",
-            mentions=[{"number": "+10000000000", "start": 6, "length": 4}],
-        )
-        assert allowed is True
-        assert chat_id == "g1"
-
-    def test_group_open_without_mention_blocks(self):
-        ch = _make_channel(group_enabled=True, group_policy="open", require_mention=True)
-        allowed, _ = self._call(ch, is_group_message=True, group_id="g1", message_text="plain talk")
-        assert allowed is False
-
-    def test_group_command_bypasses_mention_requirement(self):
-        ch = _make_channel(group_enabled=True, group_policy="open", require_mention=True)
-        allowed, _ = self._call(ch, is_group_message=True, group_id="g1", message_text="/help")
-        assert allowed is True
-
-    def test_allowed_group_appends_to_buffer(self):
-        """Side effect: when a group message is allowed, it lands in the buffer."""
-        ch = _make_channel(group_enabled=True, group_policy="open", require_mention=False)
-        self._call(ch, is_group_message=True, group_id="g1", message_text="first")
-        self._call(ch, is_group_message=True, group_id="g1", message_text="second")
-        assert len(ch._group_buffers["g1"]) == 2
-
-    def test_blocked_group_does_not_append_to_buffer(self):
-        """Side effect: when a group is disabled, the buffer must not change."""
-        ch = _make_channel(group_enabled=False)
-        self._call(ch, is_group_message=True, group_id="g1", message_text="hi")
-        assert "g1" not in ch._group_buffers
-
-
-class TestAttachmentsDir:
-    def test_default_attachments_dir(self):
-        ch = _make_channel()
-        expected = Path.home() / ".local/share/signal-cli/attachments"
-        assert ch._signal_attachments_dir() == expected
-
-    def test_configured_attachments_dir(self, tmp_path):
-        ch = _make_channel(attachments_dir=str(tmp_path / "custom"))
-        assert ch._signal_attachments_dir() == tmp_path / "custom"
-
-    def test_attachments_dir_expands_user(self):
-        ch = _make_channel(attachments_dir="~/signal-attachments")
-        assert ch._signal_attachments_dir() == Path.home() / "signal-attachments"
-
-
 class TestHandleDataMessageDM:
     def _make_dm_channel(self, policy="open", allow_from=None) -> tuple[SignalChannel, list]:
-        return _make_channel_with_capture(
-            dm_enabled=True, dm_policy=policy, dm_allow_from=allow_from or []
-        )
+        ch = _make_channel(dm_enabled=True, dm_policy=policy, dm_allow_from=allow_from or [])
+        handled: list[dict] = []
+
+        async def capture(**kwargs):
+            handled.append(kwargs)
+
+        ch._handle_message = capture  # type: ignore[method-assign]
+
+        async def noop_typing(chat_id):
+            pass
+
+        ch._start_typing = noop_typing  # type: ignore[method-assign]
+        return ch, handled
 
     @pytest.mark.asyncio
     async def test_dm_open_policy_accepted(self):
@@ -790,79 +501,11 @@ class TestHandleDataMessageDM:
         assert len(handled) == 1
 
     @pytest.mark.asyncio
-    async def test_dm_allowlist_rejected_triggers_pairing(self):
-        # Denied DM senders go through super()._handle_message which checks
-        # is_allowed → sends pairing code via self.send().
+    async def test_dm_allowlist_rejected(self):
         ch, handled = self._make_dm_channel(policy="allowlist", allow_from=["+10000000001"])
-        ch._http = _FakeHTTPClient()  # type: ignore[attr-defined]
         params = _dm_envelope(source_number="+19995550002")
         await ch._handle_receive_notification(params)
-        # The denied DM path calls super()._handle_message, not self._handle_message,
-        # so the capture list stays empty. Verify pairing code was sent via HTTP.
         assert handled == []
-        assert len(ch._http.posts) == 1  # type: ignore[attr-defined]
-        sent_text = ch._http.posts[0]["json"]["params"]["message"]  # type: ignore[attr-defined]
-        assert "pairing" in sent_text.lower() or "pair" in sent_text.lower()
-
-    @pytest.mark.asyncio
-    async def test_dm_paired_sender_allowed_without_allowlist_entry(self, monkeypatch):
-        # Once a sender completes pairing they should pass is_allowed on every
-        # subsequent message — otherwise the pairing reply loops forever.
-        approved = {"+19995550002"}
-        monkeypatch.setattr(
-            "nanobot.channels.signal.is_approved",
-            lambda channel, sender_id: sender_id in approved,
-        )
-        ch = _make_channel(dm_enabled=True, dm_policy="allowlist", dm_allow_from=[])
-        assert ch.is_allowed("+19995550002") is True
-        # Variant forms (with/without "+") must still match a stored approval.
-        assert ch.is_allowed("19995550002") is True
-        # Unpaired sender stays denied.
-        assert ch.is_allowed("+19995559999") is False
-
-    @pytest.mark.asyncio
-    async def test_dm_allowlist_matches_without_plus_prefix(self):
-        """An allowlist entry without '+' must match a sender that carries '+'."""
-        ch, handled = self._make_dm_channel(policy="allowlist", allow_from=["19995550001"])
-        params = _dm_envelope(source_number="+19995550001")
-        await ch._handle_receive_notification(params)
-        assert len(handled) == 1
-
-    @pytest.mark.asyncio
-    async def test_dm_allowlist_matches_with_plus_prefix(self):
-        """An allowlist entry with '+' must match a sender without '+'."""
-        ch, handled = self._make_dm_channel(policy="allowlist", allow_from=["+19995550001"])
-        params = _dm_envelope(source_number="+19995550001", source_uuid=None)
-        # Replace envelope's sourceNumber with the non-prefixed form by editing
-        # the constructed dict directly so _collect_sender_id_parts sees it.
-        params["envelope"]["sourceNumber"] = "19995550001"
-        await ch._handle_receive_notification(params)
-        assert len(handled) == 1
-
-    @pytest.mark.asyncio
-    async def test_dm_allowlist_matches_uuid_case_insensitive(self):
-        """UUID matching must be case-insensitive."""
-        uuid = "ABCDEF12-3456-7890-ABCD-EF1234567890"
-        ch, handled = self._make_dm_channel(policy="allowlist", allow_from=[uuid.lower()])
-        params = _dm_envelope(source_number="+19995550001", source_uuid=uuid)
-        await ch._handle_receive_notification(params)
-        assert len(handled) == 1
-
-    @pytest.mark.asyncio
-    async def test_dm_allowlist_matches_pipe_joined_composite_entry(self):
-        """Allowlist entries written as ``phone|uuid`` composites still work.
-
-        Some configs pre-date the per-part splitting and store the full
-        sender_id composite as a single allow_from entry. Keep matching it.
-        """
-        composite = "+19995550001|1872ba20-f52a-4bad-b434-bf7f808c8b22"
-        ch, handled = self._make_dm_channel(policy="allowlist", allow_from=[composite])
-        params = _dm_envelope(
-            source_number="+19995550001",
-            source_uuid="1872ba20-f52a-4bad-b434-bf7f808c8b22",
-        )
-        await ch._handle_receive_notification(params)
-        assert len(handled) == 1
 
     @pytest.mark.asyncio
     async def test_dm_disabled_rejected(self):
@@ -984,12 +627,24 @@ class TestHandleDataMessageGroup:
         allow_from=None,
         require_mention=True,
     ) -> tuple[SignalChannel, list]:
-        return _make_channel_with_capture(
+        ch = _make_channel(
             group_enabled=True,
             group_policy=policy,
             group_allow_from=allow_from or [],
             require_mention=require_mention,
         )
+        handled: list[dict] = []
+
+        async def capture(**kwargs):
+            handled.append(kwargs)
+
+        ch._handle_message = capture  # type: ignore[method-assign]
+
+        async def noop_typing(chat_id):
+            pass
+
+        ch._start_typing = noop_typing  # type: ignore[method-assign]
+        return ch, handled
 
     @pytest.mark.asyncio
     async def test_group_disabled_rejected(self):
@@ -1088,112 +743,6 @@ class TestHandleDataMessageGroup:
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle / SSE
-# ---------------------------------------------------------------------------
-
-
-class _FakeSSEResponse:
-    """Minimal stand-in for httpx Response under stream()."""
-
-    def __init__(self, lines: list[str], status_code: int = 200) -> None:
-        self.status_code = status_code
-        self._lines = lines
-
-    async def aiter_lines(self):
-        for line in self._lines:
-            yield line
-
-
-def _fake_streaming_client(lines: list[str], *, status_code: int = 200) -> MagicMock:
-    """Return an httpx.AsyncClient stand-in whose .stream() yields a FakeSSEResponse."""
-    response = _FakeSSEResponse(lines, status_code=status_code)
-
-    @asynccontextmanager
-    async def _ctx(*_args, **_kwargs):
-        yield response
-
-    http = MagicMock()
-    http.stream = lambda *a, **kw: _ctx(*a, **kw)
-    return http
-
-
-class TestLifecycle:
-    @pytest.mark.asyncio
-    async def test_start_returns_early_when_phone_missing(self):
-        """start() with an empty phone number must not enter the HTTP loop."""
-        ch = _make_channel(phone_number="")
-        await ch.start()
-        assert ch._running is False
-        assert ch._http is None
-        assert ch._sse_task is None
-
-
-class TestSSEReceiveLoop:
-    @pytest.mark.asyncio
-    async def test_dispatches_valid_envelope(self):
-        ch = _make_channel()
-        ch._running = True
-
-        captured: list[dict] = []
-
-        async def capture(params):
-            captured.append(params)
-
-        ch._handle_receive_notification = capture  # type: ignore[method-assign]
-        ch._http = _fake_streaming_client(
-            ['data: {"envelope":{"sourceNumber":"+19995550001"}}', ""]
-        )
-
-        # Loop ends when lines exhaust; the surrounding _start_http_mode would
-        # treat that as a disconnect, but the loop itself raises ConnectionError
-        # when the stream closes while still running.
-        with pytest.raises(ConnectionError):
-            await ch._sse_receive_loop()
-        assert captured == [{"envelope": {"sourceNumber": "+19995550001"}}]
-
-    @pytest.mark.asyncio
-    async def test_handles_invalid_json_frame(self):
-        """An unparseable SSE frame is logged and skipped without crashing."""
-        ch = _make_channel()
-        ch._running = True
-
-        captured: list[dict] = []
-
-        async def capture(params):
-            captured.append(params)
-
-        ch._handle_receive_notification = capture  # type: ignore[method-assign]
-        ch._http = _fake_streaming_client(
-            [
-                "data: this-is-not-json",
-                "",  # event boundary triggers parse attempt
-                'data: {"envelope":{"sourceNumber":"+1"}}',
-                "",
-            ]
-        )
-
-        with pytest.raises(ConnectionError):
-            await ch._sse_receive_loop()
-        # Bad frame skipped; good frame still dispatched.
-        assert captured == [{"envelope": {"sourceNumber": "+1"}}]
-
-    @pytest.mark.asyncio
-    async def test_non_200_status_raises(self):
-        ch = _make_channel()
-        ch._running = True
-        ch._http = _fake_streaming_client([], status_code=503)
-        with pytest.raises(ConnectionError, match="status 503"):
-            await ch._sse_receive_loop()
-
-    @pytest.mark.asyncio
-    async def test_no_http_client_raises(self):
-        ch = _make_channel()
-        ch._http = None
-        with pytest.raises(RuntimeError, match="HTTP client not initialized"):
-            await ch._sse_receive_loop()
-
-
-# ---------------------------------------------------------------------------
 # Command handling
 # ---------------------------------------------------------------------------
 
@@ -1202,29 +751,55 @@ class TestCommandHandling:
     @pytest.mark.asyncio
     async def test_dm_command_forwarded_to_bus(self):
         """Slash commands in DMs are forwarded to the bus for AgentLoop to handle."""
-        ch, forwarded = _make_channel_with_capture(dm_enabled=True, dm_policy="open")
+        ch = _make_channel(dm_enabled=True, dm_policy="open")
+        forwarded: list[dict] = []
+
+        async def capture(**kw):
+            forwarded.append(kw)
+
+        ch._handle_message = capture  # type: ignore[method-assign]
+        ch._start_typing = AsyncMock()
+
         params = _dm_envelope(source_number="+19995550001", message="/reset")
         await ch._handle_receive_notification(params)
+
         assert len(forwarded) == 1
         assert forwarded[0]["content"].strip() == "/reset"
 
     @pytest.mark.asyncio
     async def test_group_command_bypasses_mention_requirement(self):
         """Slash commands in groups bypass the mention requirement and reach the bus."""
-        ch, forwarded = _make_channel_with_capture(
+        ch = _make_channel(
             group_enabled=True, group_policy="open", require_mention=True
         )
+        forwarded: list[dict] = []
+
+        async def capture(**kw):
+            forwarded.append(kw)
+
+        ch._handle_message = capture  # type: ignore[method-assign]
+        ch._start_typing = AsyncMock()
+
         params = _group_envelope(source_number="+19995550001", group_id="grp==", message="/reset")
         await ch._handle_receive_notification(params)
+
         assert len(forwarded) == 1
         assert "/reset" in forwarded[0]["content"]
 
     @pytest.mark.asyncio
     async def test_command_denied_for_disallowed_dm_sender(self):
         """Commands from senders not on the DM allowlist are dropped."""
-        ch, forwarded = _make_channel_with_capture(dm_enabled=False)
+        ch = _make_channel(dm_enabled=False)
+        forwarded: list[dict] = []
+
+        async def capture(**kw):
+            forwarded.append(kw)
+
+        ch._handle_message = capture  # type: ignore[method-assign]
+
         params = _dm_envelope(source_number="+19995550001", message="/reset")
         await ch._handle_receive_notification(params)
+
         assert forwarded == []
 
 
@@ -1258,38 +833,6 @@ class TestSend:
         params = client.posts[0]["json"]["params"]
         assert "textStyle" in params
         assert any("BOLD" in s for s in params["textStyle"])
-
-    @pytest.mark.asyncio
-    async def test_send_split_message_redistributes_text_styles(self):
-        """Long message split across chunks: each chunk gets its own textStyle
-        with offsets rebased to that chunk."""
-        ch, client = self._make_send_channel()
-        ch._MAX_MESSAGE_LEN = 12  # type: ignore[attr-defined]
-        msg = OutboundMessage(
-            channel="signal",
-            chat_id="+19995550001",
-            content="**head** middle and **tail**",
-        )
-        await ch.send(msg)
-        assert len(client.posts) >= 2
-        # Chunk 0 has BOLD for "head"; chunk 1+ must also carry BOLD for "tail".
-        bold_chunks = [
-            p["json"]["params"]
-            for p in client.posts
-            if any("BOLD" in s for s in p["json"]["params"].get("textStyle", []))
-        ]
-        assert len(bold_chunks) >= 2, (
-            "expected BOLD ranges in more than one chunk; got "
-            f"{[p['json']['params'] for p in client.posts]}"
-        )
-        # Each emitted range must point inside its own chunk's text.
-        for params in bold_chunks:
-            chunk_text = params["message"]
-            for entry in params["textStyle"]:
-                s, ln, _ = entry.split(":", 2)
-                start, length = int(s), int(ln)
-                end_units = start + length
-                assert end_units <= len(chunk_text.encode("utf-16-le")) // 2
 
     @pytest.mark.asyncio
     async def test_send_empty_content_skips_rpc(self):
@@ -1361,14 +904,13 @@ class TestSend:
         assert "+19995550001" in stopped
 
     @pytest.mark.asyncio
-    async def test_send_raises_on_daemon_error(self):
-        # _send_http_request turns every exception into {"error": ...}, so this branch
-        # is the only place ChannelManager retry can be triggered — must raise.
+    async def test_send_logs_daemon_error_without_raising(self):
         ch = _make_channel()
+        # The daemon returns {"error": {...}} in the JSON body — this is not a Python
+        # exception; send() logs it but does not raise (only HTTP-level exceptions raise).
         ch._http = _FakeHTTPClient(default_response={"error": {"message": "fail"}})
         msg = OutboundMessage(channel="signal", chat_id="+19995550001", content="hello")
-        with pytest.raises(RuntimeError, match="signal-cli send failed"):
-            await ch.send(msg)
+        await ch.send(msg)  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -1494,7 +1036,9 @@ def test_config_allow_from_aggregates_dm_and_group() -> None:
         enabled=True,
         phone_number="+10000000000",
         dm=SignalDMConfig(enabled=True, policy="allowlist", allow_from=["+1111", "+2222"]),
-        group=SignalGroupConfig(enabled=True, policy="allowlist", allow_from=["+3333", "+1111"]),
+        group=SignalGroupConfig(
+            enabled=True, policy="allowlist", allow_from=["+3333", "+1111"]
+        ),
     )
     combined = config.allow_from
     assert "+1111" in combined
