@@ -5,6 +5,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -164,6 +165,82 @@ class WhatsAppChannel(BaseChannel):
             await self._ws.close()
             self._ws = None
 
+    @staticmethod
+    async def _deferred_unlink(path: str, delay: float = 30.0) -> None:
+        """Fire-and-forget temp-file cleanup after the bridge has had time to read it."""
+        try:
+            await asyncio.sleep(delay)
+            os.unlink(path)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    async def _resolve_media_path(self, media_path: str) -> tuple[str, bool]:
+        """Download remote URLs to a temp file. Returns (local_path, is_temp)."""
+        if media_path.startswith("http://") or media_path.startswith("https://"):
+            import tempfile
+
+            import httpx
+
+            try:
+                url_path = media_path.split("?")[0]
+                last_segment = url_path.rsplit("/", 1)[-1]
+                ext = ("." + last_segment.rsplit(".", 1)[-1]) if "." in last_segment else ".bin"
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(media_path)
+                    resp.raise_for_status()
+                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                    tmp.write(resp.content)
+                    tmp_path = tmp.name
+                self.logger.debug("Downloaded remote media {} → {}", media_path, tmp_path)
+                return tmp_path, True
+            except Exception as e:
+                self.logger.error("Failed to download remote media {}: {}", media_path, e)
+                return media_path, False
+        return media_path, False
+
+    async def _process_vcards(self, content: str) -> None:
+        """Parse vCard data from shared contacts and save to CONTACTS.md."""
+        vcard_blocks = re.findall(r"BEGIN:VCARD.*?END:VCARD", content, re.DOTALL)
+        for vcard in vcard_blocks:
+            name = ""
+            phones: list[str] = []
+            emails: list[str] = []
+            for line in vcard.splitlines():
+                if line.startswith("FN:"):
+                    name = line[3:].strip()
+                elif line.upper().startswith("TEL"):
+                    phone = line.split(":")[-1].strip()
+                    if phone:
+                        phones.append(phone)
+                elif line.upper().startswith("EMAIL"):
+                    email = line.split(":")[-1].strip()
+                    if email:
+                        emails.append(email)
+            if name:
+                await self._save_contact(name, phones, emails)
+
+    async def _save_contact(self, name: str, phones: list[str], emails: list[str]) -> None:
+        """Append a contact to workspace/CONTACTS.md if not already present."""
+        contacts_file = self.workspace / "CONTACTS.md" if hasattr(self, "workspace") else None
+        if not contacts_file:
+            return
+        existing = contacts_file.read_text(encoding="utf-8") if contacts_file.exists() else ""
+        # Skip if name already in file
+        if name in existing:
+            return
+        entry = f"\n- **{name}**"
+        if phones:
+            entry += f" | Tel: {', '.join(phones)}"
+        if emails:
+            entry += f" | Email: {', '.join(emails)}"
+        entry += "\n"
+        if not existing:
+            existing = "# Contacts\n"
+        contacts_file.write_text(existing + entry, encoding="utf-8")
+        self.logger.info("Saved contact: {}", name)
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through WhatsApp."""
         if not self._ws or not self._connected:
@@ -172,27 +249,39 @@ class WhatsAppChannel(BaseChannel):
 
         chat_id = msg.chat_id
 
+        # Send media files first
+        for media_path in msg.media or []:
+            tmp_path = None
+            try:
+                local_path, is_temp = await self._resolve_media_path(media_path)
+                if is_temp:
+                    tmp_path = local_path
+                mime, _ = mimetypes.guess_type(local_path)
+                if not mime:
+                    mime, _ = mimetypes.guess_type(media_path.split("?")[0])
+                payload = {
+                    "type": "send_media",
+                    "to": chat_id,
+                    "filePath": local_path,
+                    "mimetype": mime or "application/octet-stream",
+                    "fileName": local_path.rsplit("/", 1)[-1],
+                }
+                await self._ws.send(json.dumps(payload, ensure_ascii=False))
+                self.logger.debug("Sent media to WhatsApp: {}", local_path)
+            except Exception:
+                self.logger.exception("Error sending media {}", media_path)
+                raise
+            finally:
+                if tmp_path:
+                    asyncio.create_task(self._deferred_unlink(tmp_path))
+
+        # Send text content
         if msg.content:
             try:
                 payload = {"type": "send", "to": chat_id, "text": msg.content}
                 await self._ws.send(json.dumps(payload, ensure_ascii=False))
             except Exception:
                 self.logger.exception("Error sending message")
-                raise
-
-        for media_path in msg.media or []:
-            try:
-                mime, _ = mimetypes.guess_type(media_path)
-                payload = {
-                    "type": "send_media",
-                    "to": chat_id,
-                    "filePath": media_path,
-                    "mimetype": mime or "application/octet-stream",
-                    "fileName": media_path.rsplit("/", 1)[-1],
-                }
-                await self._ws.send(json.dumps(payload, ensure_ascii=False))
-            except Exception:
-                self.logger.exception("Error sending media {}", media_path)
                 raise
 
     async def _handle_bridge_message(self, raw: str) -> None:
@@ -258,19 +347,31 @@ class WhatsAppChannel(BaseChannel):
             # Extract media paths (images/documents/videos downloaded by the bridge)
             media_paths = data.get("media") or []
 
+            is_forwarded = data.get("isForwarded", False)
+
             # Handle voice transcription if it's a voice message
             if content == "[Voice Message]":
                 if media_paths:
                     self.logger.info("Transcribing voice message from {}...", sender_id)
                     transcription = await self.transcribe_audio(media_paths[0])
                     if transcription:
-                        content = transcription
+                        if is_forwarded:
+                            content = f"[Forwarded voice message — please summarize]\n\n{transcription}"
+                        else:
+                            content = transcription
                         media_paths = []
                         self.logger.info("Transcribed voice from {}: {}...", sender_id, transcription[:50])
                     else:
                         content = "[Voice Message: Transcription failed]"
                 else:
                     content = "[Voice Message: Audio not available]"
+
+            # Process shared contacts (vCards)
+            if content and "BEGIN:VCARD" in content:
+                try:
+                    await self._process_vcards(content)
+                except Exception:
+                    self.logger.exception("Error processing vCards")
 
             # Build content tags matching Telegram's pattern: [image: /path] or [file: /path]
             if media_paths:
