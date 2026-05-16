@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# nanobot-restart — Para, actualiza y reinicia el stack completo de nanobot.
+#
+# Uso:
+#   nanobot-restart                    # restart normal (ejecuta tests primero)
+#   nanobot-restart --force            # fuerza reinstall pip + rebuild bridge
+#   nanobot-restart --logs             # muestra los logs en vivo después de arrancar
+#   SKIP_TESTS=1 nanobot-restart       # salta los tests (usar con precaución)
+#
+# Procesos gestionados via launchd (auto-restart on crash):
+#   1. com.nanobot.bridge   (Node.js — WhatsApp bridge)
+#   2. com.nanobot.gateway  (Python — channels + agent + heartbeat)
+#   El MCP server ecuador-apis es lanzado automáticamente por nanobot (stdio).
+#
+# El script auto-detecta NANOBOT_DIR buscando el repo que lo contiene.
+# Si se instala fuera del repo, establece NANOBOT_DIR como variable de entorno.
+# ─────────────────────────────────────────────────────────────────────────────
+
+set -euo pipefail
+
+# ── PATH — añadir Homebrew por si el script se lanza sin shell interactivo ──
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$_SCRIPT_DIR/../pyproject.toml" ]]; then
+  NANOBOT_DIR="$(cd "$_SCRIPT_DIR/.." && pwd)"
+elif [[ -z "${NANOBOT_DIR:-}" ]]; then
+  _CANDIDATE="$HOME/Desktop/data-fact-nanobot"
+  if [[ -f "$_CANDIDATE/pyproject.toml" ]]; then
+    NANOBOT_DIR="$_CANDIDATE"
+  else
+    echo "ERROR: No se pudo detectar NANOBOT_DIR. Establece la variable de entorno o ejecuta desde el repo." >&2
+    exit 1
+  fi
+fi
+
+BRIDGE_DIR="$NANOBOT_DIR/bridge"
+VENV_DIR="$NANOBOT_DIR/.venv"
+LAUNCHD_VENV="$HOME/.nanobot/venv"
+NANOBOT_BIN="$VENV_DIR/bin/nanobot"
+PYTHON_BIN="$VENV_DIR/bin/python3"
+PYTEST_BIN="$VENV_DIR/bin/python -m pytest"
+LOGS_DIR="$HOME/.nanobot/logs"
+BRIDGE_LOG="$LOGS_DIR/bridge.log"
+GATEWAY_LOG="$LOGS_DIR/gateway.log"
+
+# launchd plist paths
+BRIDGE_PLIST="$HOME/Library/LaunchAgents/com.nanobot.bridge.plist"
+GATEWAY_PLIST="$HOME/Library/LaunchAgents/com.nanobot.gateway.plist"
+
+# ── Opciones ─────────────────────────────────────────────────────────────────
+FORCE=0
+SHOW_LOGS=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+    --logs)  SHOW_LOGS=1 ;;
+  esac
+done
+
+# ── Colores ──────────────────────────────────────────────────────────────────
+R='\033[0;31m'; G='\033[0;32m'; Y='\033[0;33m'; B='\033[0;34m'; C='\033[0;36m'; N='\033[0m'; BOLD='\033[1m'
+
+ok()   { echo -e "${G}✅${N}  $*"; }
+info() { echo -e "${B}ℹ️${N}   $*"; }
+warn() { echo -e "${Y}⚠️${N}   $*"; }
+step() { echo -e "\n${BOLD}${C}▶  $*${N}"; }
+hr()   { echo -e "${C}────────────────────────────────────────────────${N}"; }
+
+hr
+echo -e "${BOLD}  nanobot-restart${N}  $(date '+%Y-%m-%d %H:%M:%S')"
+hr
+
+mkdir -p "$LOGS_DIR"
+
+# ── 0. VERIFICAR venv ────────────────────────────────────────────────────────
+if [[ ! -f "$NANOBOT_BIN" ]]; then
+  echo -e "${R}ERROR: No se encontró el venv en $VENV_DIR${N}"
+  echo -e "Crea el venv con:  python3 -m venv $VENV_DIR && $PYTHON_BIN -m pip install -e \"$NANOBOT_DIR\""
+  exit 1
+fi
+
+# ── 1. PRE-RELEASE TESTS ─────────────────────────────────────────────────────
+# Se ejecutan ANTES de parar nanobot para que el agente siga funcionando
+# si los tests fallan.
+step "Ejecutando pre-release smoke tests..."
+
+TEST_FILE="$NANOBOT_DIR/tests/test_prerelease.py"
+
+if [[ ! -f "$TEST_FILE" ]]; then
+  warn "No se encontró tests/test_prerelease.py — saltando tests"
+elif [[ ! -f "$VENV_DIR/bin/python" ]]; then
+  warn "Python no encontrado en el venv — saltando tests"
+else
+  cd "$NANOBOT_DIR"
+  if $PYTEST_BIN "$TEST_FILE" -q --tb=short 2>&1; then
+    ok "Todos los tests pasaron ✅"
+  else
+    echo -e "\n${R}❌  Los pre-release tests han fallado.${N}"
+    echo -e "${Y}   Corrige los errores antes de reiniciar.${N}"
+    echo -e "${Y}   Para forzar el restart: SKIP_TESTS=1 nanobot-restart${N}\n"
+    if [[ "${SKIP_TESTS:-0}" != "1" ]]; then
+      exit 1
+    else
+      warn "SKIP_TESTS=1 — continuando de todas formas..."
+    fi
+  fi
+fi
+
+# ── 2. PARAR servicios launchd ───────────────────────────────────────────────
+step "Parando servicios launchd..."
+
+if launchctl list com.nanobot.gateway &>/dev/null; then
+  launchctl unload "$GATEWAY_PLIST" 2>/dev/null || true
+  ok "Parado: com.nanobot.gateway"
+else
+  info "No estaba cargado: com.nanobot.gateway"
+fi
+
+if launchctl list com.nanobot.bridge &>/dev/null; then
+  launchctl unload "$BRIDGE_PLIST" 2>/dev/null || true
+  ok "Parado: com.nanobot.bridge"
+else
+  info "No estaba cargado: com.nanobot.bridge"
+fi
+
+# Kill any orphan processes (from old nohup launches or launchd stragglers)
+pkill -f "nanobot gateway" 2>/dev/null || true
+pkill -f "node.*bridge/dist/index.js" 2>/dev/null || true
+
+# Fallback: kill anything holding port 3001
+STALE_PID=$(lsof -ti :3001 2>/dev/null || true)
+if [[ -n "$STALE_PID" ]]; then
+  warn "Puerto 3001 aún ocupado (PID $STALE_PID) — matando..."
+  kill $STALE_PID 2>/dev/null || true
+  sleep 1
+  kill -9 $STALE_PID 2>/dev/null || true
+fi
+
+sleep 1
+
+# ── 3. ACTUALIZAR dependencias Python ─────────────────────────────────────────
+step "Comprobando dependencias Python..."
+
+cd "$NANOBOT_DIR"
+# Dev venv (editable install — used for tests and interactive dev)
+"$PYTHON_BIN" -m pip install -e "." --quiet 2>&1 | tail -3
+
+# launchd venv (non-editable — lives outside ~/Desktop to avoid TCC)
+if [[ -d "$LAUNCHD_VENV" ]]; then
+  "$LAUNCHD_VENV/bin/pip" install "$NANOBOT_DIR" --quiet 2>&1 | tail -3
+  ok "Dependencias Python verificadas (dev + launchd venvs)"
+else
+  warn "launchd venv no encontrado en $LAUNCHD_VENV — solo dev venv actualizado"
+  ok "Dependencias Python verificadas (dev venv)"
+fi
+
+# ── 4. ¿RECOMPILAR bridge? ───────────────────────────────────────────────────
+step "Comprobando bridge TypeScript..."
+
+DIST_JS="$BRIDGE_DIR/dist/index.js"
+NEWEST_TS=$(find "$BRIDGE_DIR/src" -name "*.ts" -newer "$DIST_JS" 2>/dev/null | head -1 || true)
+
+NEEDS_BUILD=0
+if [[ $FORCE -eq 1 ]]; then
+  warn "Modo --force: recompilando bridge..."
+  NEEDS_BUILD=1
+elif [[ ! -f "$DIST_JS" ]]; then
+  warn "dist/index.js no existe — compilando..."
+  NEEDS_BUILD=1
+elif [[ -n "$NEWEST_TS" ]]; then
+  warn "Archivos .ts modificados — recompilando bridge..."
+  NEEDS_BUILD=1
+else
+  ok "Bridge compilado y actualizado (sin cambios)"
+fi
+
+if [[ $NEEDS_BUILD -eq 1 ]]; then
+  cd "$BRIDGE_DIR"
+  npm run build 2>&1 | tail -5
+  ok "Bridge compilado"
+fi
+
+# ── 5. ROTAR logs ────────────────────────────────────────────────────────────
+step "Rotando logs..."
+
+ROTATE_LINES=5000
+[[ -f "$BRIDGE_LOG" ]] && tail -n "$ROTATE_LINES" "$BRIDGE_LOG" > "${BRIDGE_LOG}.prev" 2>/dev/null; rm -f "$BRIDGE_LOG"
+[[ -f "$GATEWAY_LOG" ]] && tail -n "$ROTATE_LINES" "$GATEWAY_LOG" > "${GATEWAY_LOG}.prev" 2>/dev/null; rm -f "$GATEWAY_LOG"
+ok "Logs rotados"
+
+# ── 6. ARRANCAR servicios via launchd ─────────────────────────────────────────
+step "Arrancando servicios via launchd..."
+
+if [[ ! -f "$BRIDGE_PLIST" ]] || [[ ! -f "$GATEWAY_PLIST" ]]; then
+  echo -e "${R}ERROR: Faltan los plists de launchd${N}"
+  echo -e "  Esperados: $BRIDGE_PLIST"
+  echo -e "             $GATEWAY_PLIST"
+  exit 1
+fi
+
+# Bridge first (gateway needs it)
+launchctl load "$BRIDGE_PLIST" 2>&1
+sleep 3
+
+BRIDGE_PID=$(launchctl list com.nanobot.bridge 2>/dev/null | grep '"PID"' | grep -o '[0-9]*' || echo "")
+if [[ -n "$BRIDGE_PID" ]]; then
+  ok "Bridge arrancado via launchd  (PID $BRIDGE_PID)  →  $BRIDGE_LOG"
+else
+  echo -e "${R}❌  Bridge falló al arrancar. Revisa:  $BRIDGE_LOG${N}"
+  tail -20 "$BRIDGE_LOG"
+  exit 1
+fi
+
+# Gateway
+launchctl load "$GATEWAY_PLIST" 2>&1
+sleep 5
+
+GATEWAY_PID=$(launchctl list com.nanobot.gateway 2>/dev/null | grep '"PID"' | grep -o '[0-9]*' || echo "")
+if [[ -n "$GATEWAY_PID" ]]; then
+  ok "Gateway arrancado via launchd  (PID $GATEWAY_PID)  →  $GATEWAY_LOG"
+else
+  echo -e "${R}❌  Gateway falló al arrancar. Revisa:  $GATEWAY_LOG${N}"
+  tail -30 "$GATEWAY_LOG"
+  exit 1
+fi
+
+# ── 7. RESUMEN ───────────────────────────────────────────────────────────────
+hr
+echo -e "${BOLD}  Stack levantado (launchd — auto-restart on crash)${N}"
+hr
+echo -e "  ${G}●${N}  com.nanobot.bridge    PID ${BOLD}$BRIDGE_PID${N}"
+echo -e "  ${G}●${N}  com.nanobot.gateway   PID ${BOLD}$GATEWAY_PID${N}"
+echo -e "  ${B}●${N}  MCP ecuador-apis      auto (stdio)"
+echo
+echo -e "  Logs:  tail -f $GATEWAY_LOG"
+echo -e "         tail -f $BRIDGE_LOG"
+echo -e "  Stop:  launchctl unload $GATEWAY_PLIST $BRIDGE_PLIST"
+hr
+
+# ── 8. TAIL logs (opcional) ──────────────────────────────────────────────────
+if [[ $SHOW_LOGS -eq 1 ]]; then
+  echo -e "\n${Y}Mostrando logs (Ctrl+C para salir)...${N}\n"
+  tail -f "$GATEWAY_LOG" "$BRIDGE_LOG"
+fi
