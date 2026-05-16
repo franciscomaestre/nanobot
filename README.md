@@ -23,6 +23,25 @@
 
 ## 📢 News
 
+- **2026-05-15** 🚀 Released **v0.2.0** — **`/goal`** holds sustained objectives across turns, WebUI now ships inside the wheel, image generation end to end, 5 new providers with `fallback_models`, and a real agent-loop refactor. Please see [release notes](https://github.com/HKUDS/nanobot/releases/tag/v0.2.0) for details.
+- **2026-05-14** 🎯 **`/goal`** for long-term objectives, visible multi-step progress, long-horizon missions in chat.
+- **2026-05-13** 🧠 Streaming reasoning before answers, automatic backup models, smoother plug-in reconnects.
+- **2026-05-12** 🎛️ Saved model presets with WebUI badge, simpler plug-in tools, quieter Feishu topic threads.
+- **2026-05-11** 🖥️ NVIDIA NIM support, terminal bot name and icon, streamed reasoning and MiMo toggle clarity.
+- **2026-05-09** 🖼️ Sharper image replay, BYO web-search keys in Settings, Feishu threads routed cleanly.
+- **2026-05-08** ✨ Inline chat image, redesigned Settings and keys, Dream memory aligned with visible history.
+- **2026-05-07** 📜 Locale-aware slash palette in WebUI, LAN login, faithful HTTP streaming responses.
+- **2026-05-06** 🧩 Tunable tool hint, steadier voice and plug-in startups, schedules and reminders that stick.
+- **2026-05-05** 🛡️ Quiet deny for unknown Telegram chats, Dream cleanup, fuller automation summaries.
+
+<details>
+<summary>Earlier news</summary>
+
+- **2026-05-04** 🔐 Safer DingTalk outbound media links, durable cron persistence, DeepSeek polish.
+- **2026-05-03** ⚙️ Predictable shell allow-list behavior, isolated chats mid-reply, cleaner interactive retries.
+- **2026-05-02** 🐈 LongCat support, smarter token sizing hints, clearer bundled upgrade guidance.
+- **2026-05-01** ☁️ Native AWS Bedrock provider, tighter helper handoffs and scoped session files.
+- **2026-04-30** 💬 Feishu threads that honor replies and topics, WhatsApp bridge refresh on source edits.
 - **2026-04-29** 🚀 Released **v0.1.5.post3** — Smarter threads on Feishu, Discord, Slack, and Teams; **DeepSeek-V4**; Hugging Face & Olostep; choices, `/history`, and steadier long chats. Please see [release notes](https://github.com/HKUDS/nanobot/releases/tag/v0.1.5.post3) for details.
 - **2026-04-28** 🌐 Olostep web search, Hugging Face provider, safer workspace-tool interruptions.
 - **2026-04-27** 💬 `/history` command, smarter session replay caps, smoother Discord / Slack threads.
@@ -42,10 +61,6 @@
 - **2026-04-13** 🛡️ Agent turn hardened — user messages persisted early, auto-compact skips active tasks.
 - **2026-04-12** 🔒 Lark global domain support, Dream learns discovered skills, shell sandbox tightened.
 - **2026-04-11** ⚡ Context compact shrinks sessions on the fly; Kagi web search; QQ & WeCom full media.
-
-<details>
-<summary>Earlier news</summary>
-
 - **2026-04-10** 📓 Notebook editing tool, multiple MCP servers, Feishu streaming & done-emoji.
 - **2026-04-09** 🔌 WebSocket channel, unified cross-channel session, `disabled_skills` config.
 - **2026-04-08** 📤 API file uploads, OpenAI reasoning auto-routing with Responses fallback.
@@ -188,35 +203,7 @@ Configure these **two parts** in your config (other options have defaults). Add 
   }
 }
 ```
-*Run NanoBot Locally* (No Cloud)
 
-Use a local model instead of a hosted API provider.
-
-| Step | What to do |
-|---|---|
-| 1 | Install [Atomic Chat](https://atomic.chat/) on your machine. |
-| 2 | Open Atomic Chat, download a model, and keep the app running (the local API is enabled by default). |
-| 3 | In Atomic Chat, copy the model ID exposed by the local API. For example, the model ID for `Qwen 3 32B` might be `qwen3-32b`. |
-| 4 | Open `~/.nanobot/config.json` and add the Atomic Chat provider settings shown below. Replace the example model ID with the one from Step 3. Merge this into your existing config instead of replacing the whole file. |
-
-Example:
-
-```json
-{
-  "providers": {
-    "atomic_chat": {
-      "apiKey": null,
-      "apiBase": "http://127.0.0.1:1337/v1"
-    }
-  },
-  "agents": {
-    "defaults": {
-      "provider": "atomic_chat",
-      "model": "qwen3-32b"
-    }
-  }
-}
-```
 **3. Chat**
 
 ```bash
@@ -225,14 +212,12 @@ nanobot agent
 
 
 - Want different LLM providers, web search, MCP, security settings, or more config options? See [Configuration](./docs/configuration.md)
-- Want to run locally? Use Atomic Chat, Ollama, LM Studio, OpenVINO Model Server, vLLM, or any OpenAI-compatible local server. See [Configuration](./docs/configuration.md)
 - Want to run nanobot in chat apps like Telegram, Discord, WeChat or Feishu? See [Chat Apps](./docs/chat-apps.md)
 - Want Docker or Linux service deployment? See [Deployment](./docs/deployment.md)
 
-## 🧪 WebUI (Development)
+## 🌐 WebUI
 
-> [!NOTE]
-> The WebUI development workflow currently requires a source checkout and is not yet shipped together with the official packaged release. See [WebUI Document](./webui/README.md) for full WebUI development docs and build steps.
+The WebUI ships **inside the published wheel** — no extra build step. Just enable the WebSocket channel and open it in your browser.
 
 <p align="center">
   <img src="images/nanobot_webui.png" alt="nanobot webui preview" width="900">
@@ -250,13 +235,12 @@ nanobot agent
 nanobot gateway
 ```
 
-**3. Start the webui dev server**
+**3. Open the WebUI**
 
-```bash
-cd webui
-bun install
-bun run dev
-```
+Visit [`http://127.0.0.1:8765`](http://127.0.0.1:8765) in your browser. To open it from another device on your LAN, see [WebUI docs → LAN access](./webui/README.md#access-from-another-device-lan).
+
+> [!TIP]
+> Working on the WebUI itself? Check out [`webui/README.md`](./webui/README.md) for the Vite dev server (HMR) workflow.
 
 ## 🏗️ Architecture
 
