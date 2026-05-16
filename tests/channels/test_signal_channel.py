@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -59,6 +60,24 @@ class _FakeHTTPClient:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _make_channel_with_capture(**overrides) -> tuple[SignalChannel, list[dict]]:
+    """Build a SignalChannel with _handle_message captured into a list and a
+    no-op _start_typing, used by every receive-flow test class.
+    """
+    ch = _make_channel(**overrides)
+    handled: list[dict] = []
+
+    async def capture(**kwargs):
+        handled.append(kwargs)
+
+    async def noop_typing(chat_id):
+        pass
+
+    ch._handle_message = capture  # type: ignore[method-assign]
+    ch._start_typing = noop_typing  # type: ignore[method-assign]
+    return ch, handled
 
 
 def _make_channel(
@@ -589,19 +608,9 @@ class TestAttachmentsDir:
 
 class TestHandleDataMessageDM:
     def _make_dm_channel(self, policy="open", allow_from=None) -> tuple[SignalChannel, list]:
-        ch = _make_channel(dm_enabled=True, dm_policy=policy, dm_allow_from=allow_from or [])
-        handled: list[dict] = []
-
-        async def capture(**kwargs):
-            handled.append(kwargs)
-
-        ch._handle_message = capture  # type: ignore[method-assign]
-
-        async def noop_typing(chat_id):
-            pass
-
-        ch._start_typing = noop_typing  # type: ignore[method-assign]
-        return ch, handled
+        return _make_channel_with_capture(
+            dm_enabled=True, dm_policy=policy, dm_allow_from=allow_from or []
+        )
 
     @pytest.mark.asyncio
     async def test_dm_open_policy_accepted(self):
@@ -776,24 +785,12 @@ class TestHandleDataMessageGroup:
         allow_from=None,
         require_mention=True,
     ) -> tuple[SignalChannel, list]:
-        ch = _make_channel(
+        return _make_channel_with_capture(
             group_enabled=True,
             group_policy=policy,
             group_allow_from=allow_from or [],
             require_mention=require_mention,
         )
-        handled: list[dict] = []
-
-        async def capture(**kwargs):
-            handled.append(kwargs)
-
-        ch._handle_message = capture  # type: ignore[method-assign]
-
-        async def noop_typing(chat_id):
-            pass
-
-        ch._start_typing = noop_typing  # type: ignore[method-assign]
-        return ch, handled
 
     @pytest.mark.asyncio
     async def test_group_disabled_rejected(self):
@@ -892,6 +889,112 @@ class TestHandleDataMessageGroup:
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle / SSE
+# ---------------------------------------------------------------------------
+
+
+class _FakeSSEResponse:
+    """Minimal stand-in for httpx Response under stream()."""
+
+    def __init__(self, lines: list[str], status_code: int = 200) -> None:
+        self.status_code = status_code
+        self._lines = lines
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+
+def _fake_streaming_client(lines: list[str], *, status_code: int = 200) -> MagicMock:
+    """Return an httpx.AsyncClient stand-in whose .stream() yields a FakeSSEResponse."""
+    response = _FakeSSEResponse(lines, status_code=status_code)
+
+    @asynccontextmanager
+    async def _ctx(*_args, **_kwargs):
+        yield response
+
+    http = MagicMock()
+    http.stream = lambda *a, **kw: _ctx(*a, **kw)
+    return http
+
+
+class TestLifecycle:
+    @pytest.mark.asyncio
+    async def test_start_returns_early_when_phone_missing(self):
+        """start() with an empty phone number must not enter the HTTP loop."""
+        ch = _make_channel(phone_number="")
+        await ch.start()
+        assert ch._running is False
+        assert ch._http is None
+        assert ch._sse_task is None
+
+
+class TestSSEReceiveLoop:
+    @pytest.mark.asyncio
+    async def test_dispatches_valid_envelope(self):
+        ch = _make_channel()
+        ch._running = True
+
+        captured: list[dict] = []
+
+        async def capture(params):
+            captured.append(params)
+
+        ch._handle_receive_notification = capture  # type: ignore[method-assign]
+        ch._http = _fake_streaming_client(
+            ['data: {"envelope":{"sourceNumber":"+19995550001"}}', ""]
+        )
+
+        # Loop ends when lines exhaust; the surrounding _start_http_mode would
+        # treat that as a disconnect, but the loop itself raises ConnectionError
+        # when the stream closes while still running.
+        with pytest.raises(ConnectionError):
+            await ch._sse_receive_loop()
+        assert captured == [{"envelope": {"sourceNumber": "+19995550001"}}]
+
+    @pytest.mark.asyncio
+    async def test_handles_invalid_json_frame(self):
+        """An unparseable SSE frame is logged and skipped without crashing."""
+        ch = _make_channel()
+        ch._running = True
+
+        captured: list[dict] = []
+
+        async def capture(params):
+            captured.append(params)
+
+        ch._handle_receive_notification = capture  # type: ignore[method-assign]
+        ch._http = _fake_streaming_client(
+            [
+                "data: this-is-not-json",
+                "",  # event boundary triggers parse attempt
+                'data: {"envelope":{"sourceNumber":"+1"}}',
+                "",
+            ]
+        )
+
+        with pytest.raises(ConnectionError):
+            await ch._sse_receive_loop()
+        # Bad frame skipped; good frame still dispatched.
+        assert captured == [{"envelope": {"sourceNumber": "+1"}}]
+
+    @pytest.mark.asyncio
+    async def test_non_200_status_raises(self):
+        ch = _make_channel()
+        ch._running = True
+        ch._http = _fake_streaming_client([], status_code=503)
+        with pytest.raises(ConnectionError, match="status 503"):
+            await ch._sse_receive_loop()
+
+    @pytest.mark.asyncio
+    async def test_no_http_client_raises(self):
+        ch = _make_channel()
+        ch._http = None
+        with pytest.raises(RuntimeError, match="HTTP client not initialized"):
+            await ch._sse_receive_loop()
+
+
+# ---------------------------------------------------------------------------
 # Command handling
 # ---------------------------------------------------------------------------
 
@@ -900,55 +1003,31 @@ class TestCommandHandling:
     @pytest.mark.asyncio
     async def test_dm_command_forwarded_to_bus(self):
         """Slash commands in DMs are forwarded to the bus for AgentLoop to handle."""
-        ch = _make_channel(dm_enabled=True, dm_policy="open")
-        forwarded: list[dict] = []
-
-        async def capture(**kw):
-            forwarded.append(kw)
-
-        ch._handle_message = capture  # type: ignore[method-assign]
-        ch._start_typing = AsyncMock()
-
+        ch, forwarded = _make_channel_with_capture(dm_enabled=True, dm_policy="open")
         params = _dm_envelope(source_number="+19995550001", message="/reset")
         await ch._handle_receive_notification(params)
-
         assert len(forwarded) == 1
         assert forwarded[0]["content"].strip() == "/reset"
 
     @pytest.mark.asyncio
     async def test_group_command_bypasses_mention_requirement(self):
         """Slash commands in groups bypass the mention requirement and reach the bus."""
-        ch = _make_channel(
+        ch, forwarded = _make_channel_with_capture(
             group_enabled=True, group_policy="open", require_mention=True
         )
-        forwarded: list[dict] = []
-
-        async def capture(**kw):
-            forwarded.append(kw)
-
-        ch._handle_message = capture  # type: ignore[method-assign]
-        ch._start_typing = AsyncMock()
-
-        params = _group_envelope(source_number="+19995550001", group_id="grp==", message="/reset")
+        params = _group_envelope(
+            source_number="+19995550001", group_id="grp==", message="/reset"
+        )
         await ch._handle_receive_notification(params)
-
         assert len(forwarded) == 1
         assert "/reset" in forwarded[0]["content"]
 
     @pytest.mark.asyncio
     async def test_command_denied_for_disallowed_dm_sender(self):
         """Commands from senders not on the DM allowlist are dropped."""
-        ch = _make_channel(dm_enabled=False)
-        forwarded: list[dict] = []
-
-        async def capture(**kw):
-            forwarded.append(kw)
-
-        ch._handle_message = capture  # type: ignore[method-assign]
-
+        ch, forwarded = _make_channel_with_capture(dm_enabled=False)
         params = _dm_envelope(source_number="+19995550001", message="/reset")
         await ch._handle_receive_notification(params)
-
         assert forwarded == []
 
 
