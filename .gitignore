@@ -97,3 +97,7 @@ logs/
 tmp/
 temp/
 *.tmp
+node_modules/
+.venv/
+bridge/node_modules/
+bridge/dist/
