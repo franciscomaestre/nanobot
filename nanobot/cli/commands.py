@@ -807,6 +807,11 @@ def _run_gateway(
 
         response = resp.content if resp else ""
 
+        # Silent jobs: agent ran but we don't auto-deliver the response.
+        # The agent can still use the 'message' tool explicitly to notify.
+        if job.payload.silent:
+            return response
+
         if job.payload.deliver and isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
             return response
 
