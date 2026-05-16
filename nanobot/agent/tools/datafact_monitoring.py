@@ -1,17 +1,18 @@
 """DataFact monitoring tools — importadores, descargas SRI y scripts.
 
-Estas tools envuelven queries MySQL específicas usando el MCP de mysql
-(mcp_mysql_mysql_query) que ya está registrado en el agente.
+These are standalone tools that return pre-defined SQL queries for the agent
+to understand. The actual SQL execution happens via the MCP mysql_query tool
+which the agent calls separately.
+
+In v0.2.0, tools use Tool.create(ctx) → cls() so they must not require
+constructor arguments beyond what the base Tool provides.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from nanobot.agent.tools.base import Tool
-
-if TYPE_CHECKING:
-    from nanobot.agent.tools.registry import ToolRegistry
 
 
 class ObtenerAvancesImportadoresTool(Tool):
@@ -23,19 +24,14 @@ class ObtenerAvancesImportadoresTool(Tool):
         "donde se registran los avances de los procesos de importación. "
         "No requiere parámetros de entrada y devuelve una lista de registros con la "
         "información registrada por los importadores, incluyendo fecha, estado y posibles errores.\n\n"
-        "Ejemplo: \"Dime el estado actual de los procesos de importación.\""
+        'Ejemplo: "Dime el estado actual de los procesos de importación."'
     )
     parameters: dict = {"type": "object", "properties": {}, "required": []}
 
-    def __init__(self, registry: "ToolRegistry"):
-        self._registry = registry
-
     async def execute(self, **kwargs: Any) -> str:
-        tool = self._registry.get("mcp_mysql_mysql_query")
-        if not tool:
-            return "Error: mcp_mysql_mysql_query no disponible."
-        return await tool.execute(
-            sql="SELECT * FROM auditoria_logs_bases ORDER BY fecha DESC LIMIT 16"
+        return (
+            "[INSTRUCCIÓN INTERNA] Ejecuta mcp_data-fact_mysql_query con este SQL:\n\n"
+            "SELECT * FROM auditoria_logs_bases ORDER BY fecha DESC LIMIT 16"
         )
 
 
@@ -53,7 +49,7 @@ class ObtenerAnalisisSistemaDescargasFacturasSRITool(Tool):
         "- incremento_24_48_horas_en_millones: diferencia entre el total registrado ayer y el de anteayer.\n\n"
         "Permite monitorear tendencias diarias y mensuales en las descargas del sistema, "
         "útil para detectar cambios, anomalías o mejoras en el rendimiento.\n\n"
-        "Ejemplo: \"Dime cómo va el sistema de descargas del SRI.\""
+        'Ejemplo: "Dime cómo va el sistema de descargas del SRI."'
     )
     parameters: dict = {"type": "object", "properties": {}, "required": []}
 
@@ -107,14 +103,11 @@ SELECT
   ), 2) AS incremento_24_48_horas_en_millones
 """
 
-    def __init__(self, registry: "ToolRegistry"):
-        self._registry = registry
-
     async def execute(self, **kwargs: Any) -> str:
-        tool = self._registry.get("mcp_mysql_mysql_query")
-        if not tool:
-            return "Error: mcp_mysql_mysql_query no disponible."
-        return await tool.execute(sql=self._SQL)
+        return (
+            "[INSTRUCCIÓN INTERNA] Ejecuta mcp_data-fact_mysql_query con este SQL:\n\n"
+            + self._SQL
+        )
 
 
 class ObtenerAnalisisFuncionamientoScriptsTool(Tool):
@@ -125,21 +118,14 @@ class ObtenerAnalisisFuncionamientoScriptsTool(Tool):
         "Obtiene los logs de funcionamiento de los scripts que se están ejecutando en los servidores. "
         "Devuelve los registros de los últimos 2 días. "
         "Si no hay detalle de falla, el script ha funcionado correctamente.\n\n"
-        "Ejemplo: \"¿Los scripts están funcionando correctamente? Muéstrame el análisis.\""
+        'Ejemplo: "¿Los scripts están funcionando correctamente? Muéstrame el análisis."'
     )
     parameters: dict = {"type": "object", "properties": {}, "required": []}
 
-    def __init__(self, registry: "ToolRegistry"):
-        self._registry = registry
-
     async def execute(self, **kwargs: Any) -> str:
-        tool = self._registry.get("mcp_mysql_mysql_query")
-        if not tool:
-            return "Error: mcp_mysql_mysql_query no disponible."
-        return await tool.execute(
-            sql=(
-                "SELECT * FROM auditoria_logs_scripts "
-                "WHERE fecha_actualizacion > (CURDATE() - INTERVAL 2 DAY) "
-                "ORDER BY fecha_actualizacion DESC"
-            )
+        return (
+            "[INSTRUCCIÓN INTERNA] Ejecuta mcp_data-fact_mysql_query con este SQL:\n\n"
+            "SELECT * FROM auditoria_logs_scripts "
+            "WHERE fecha_actualizacion > (CURDATE() - INTERVAL 2 DAY) "
+            "ORDER BY fecha_actualizacion DESC"
         )

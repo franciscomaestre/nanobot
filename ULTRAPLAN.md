@@ -128,22 +128,22 @@
 
 ## CHECKLIST DE EJECUCIÓN
 
-- [ ] 1.1 startupTimestamp en bridge
-- [ ] 1.2 isForwarded en bridge
-- [ ] 1.3 vCard parsing en bridge
-- [ ] 2.1 _resolve_media_path
-- [ ] 2.2 _deferred_unlink
-- [ ] 2.3 Integrar en send()
-- [ ] 2.4 _process_vcards + _save_contact
-- [ ] 2.5 Forwarded voice handling
-- [ ] 3.1 AssemblyAI provider
-- [ ] 3.2 Registrar en base channel
-- [ ] 4.1 Silent flag en cron types
-- [ ] 4.2 lock_recipient en cron types
-- [ ] 4.3 Silent mode en cron service
-- [ ] 4.4 Exponer en cron tool
-- [ ] 5.1 Pre-release tests
-- [ ] 6.1 npm install bridge
-- [ ] 6.2 Copiar workspace
-- [ ] 6.3 Test arranque
-- [ ] 6.4 Test WhatsApp
+- [x] 1.1 startupTimestamp en bridge ✅
+- [x] 1.2 isForwarded en bridge ✅
+- [x] 1.3 vCard parsing en bridge ✅
+- [x] 2.1 _resolve_media_path ✅
+- [x] 2.2 _deferred_unlink ✅
+- [x] 2.3 Integrar en send() ✅
+- [x] 2.4 _process_vcards + _save_contact ✅
+- [x] 2.5 Forwarded voice handling ✅
+- [x] 3.1 AssemblyAI provider ✅
+- [x] 3.2 Registrar en base channel ✅
+- [x] 4.1 Silent flag en cron types ✅
+- [x] 4.2 lock_recipient en cron types ✅
+- [x] 4.3 Silent mode en cron service ✅
+- [x] 4.4 Exponer en cron tool ✅
+- [x] 5.1 Pre-release tests (ya estaba en nanobot-restart) ✅
+- [x] 6.1 npm install bridge ✅
+- [ ] 6.2 Copiar workspace — COMPARTIDO (~/.nanobot/), no necesita copia
+- [ ] 6.3 Test arranque — PENDIENTE: reinstalar venv launchd + actualizar run-bridge.sh
+- [ ] 6.4 Test WhatsApp — PENDIENTE: requiere activar v2
