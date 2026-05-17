@@ -41,6 +41,7 @@ from nanobot.utils.document import extract_documents
 from nanobot.utils.helpers import detect_image_mime, image_placeholder_text
 from nanobot.utils.helpers import truncate_text as truncate_text_fn
 from nanobot.utils.image_generation_intent import image_generation_prompt
+from nanobot.utils.llm_runtime import LLMRuntime
 from nanobot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 from nanobot.utils.webui_turn_helpers import (
     WebuiTurnCoordinator,
@@ -135,6 +136,11 @@ class AgentLoop:
     @property
     def tool_names(self) -> list[str]:
         return self.tools.tool_names
+
+    def llm_runtime(self) -> LLMRuntime:
+        """Return the current provider/model pair owned by this loop."""
+        self._refresh_provider_snapshot()
+        return LLMRuntime(self.provider, self.model)
 
     _RUNTIME_CHECKPOINT_KEY = "runtime_checkpoint"
     _PENDING_USER_TURN_KEY = "pending_user_turn"
@@ -1338,8 +1344,7 @@ class AgentLoop:
         self._webui_turns.capture_title_context(
             ctx.session_key,
             ctx.msg,
-            self.provider,
-            self.model,
+            self.llm_runtime(),
         )
 
         ctx.initial_messages = self._build_initial_messages(
