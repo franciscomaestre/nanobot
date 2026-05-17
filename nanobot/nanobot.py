@@ -67,7 +67,6 @@ class Nanobot:
                 "openrouter": config.providers.openrouter,
                 "aihubmix": config.providers.aihubmix,
                 "minimax": config.providers.minimax,
-                "gemini": config.providers.gemini,
             },
         )
         return cls(loop)
