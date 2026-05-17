@@ -22,6 +22,11 @@ if sys.platform == "win32":
 import typer
 from loguru import logger
 
+# Buffered reasoning display: accumulate streaming tokens and flush
+# on sentence/line boundaries so the user sees grouped text instead of
+# one token per line. The empty string placeholder is the sentinel.
+_reasoning_buf: str = ""
+
 # Remove default handler and re-add with unified nanobot format
 logger.remove()
 _log_handler_id = logger.add(
@@ -91,8 +96,6 @@ app = typer.Typer(
 
 console = Console()
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
-_REASONING_SENTENCE_ENDINGS = (".", "!", "?", "。", "！", "？")
-_REASONING_FLUSH_CHARS = 60
 
 # ---------------------------------------------------------------------------
 # CLI input: prompt_toolkit for editing, paste, history, and display
@@ -244,39 +247,14 @@ def _print_cli_progress_line(text: str, thinking: ThinkingSpinner | None, render
         target.print(f"  [dim]↳ {text}[/dim]")
 
 
-class _ReasoningBuffer:
-    def __init__(self) -> None:
-        self._text = ""
-
-    def add(self, text: str) -> str | None:
-        if not text:
-            return None
-        self._text += text
-        if self._should_flush(text):
-            return self.flush()
-        return None
-
-    def flush(self) -> str | None:
-        text = self._text.strip()
-        self._text = ""
-        return text or None
-
-    def clear(self) -> None:
-        self._text = ""
-
-    def _should_flush(self, text: str) -> bool:
-        stripped = text.rstrip()
-        return (
-            "\n" in text
-            or stripped.endswith(_REASONING_SENTENCE_ENDINGS)
-            or len(self._text) >= _REASONING_FLUSH_CHARS
-        )
-
-
-def _print_cli_reasoning(text: str, thinking: ThinkingSpinner | None, renderer: StreamRenderer | None = None) -> None:
-    """Print reasoning/thinking content in a distinct style."""
-    if not text.strip():
+def _flush_reasoning(thinking: ThinkingSpinner | None, renderer: StreamRenderer | None = None) -> None:
+    """Flush accumulated reasoning buffer to the display."""
+    global _reasoning_buf
+    if not _reasoning_buf or not _reasoning_buf.strip():
+        _reasoning_buf = ""
         return
+    text = _reasoning_buf.strip()
+    _reasoning_buf = ""
     target = renderer.console if renderer else console
     pause = renderer.pause_spinner() if renderer else (thinking.pause() if thinking else nullcontext())
     with pause:
@@ -285,14 +263,26 @@ def _print_cli_reasoning(text: str, thinking: ThinkingSpinner | None, renderer: 
         target.print(f"[dim italic]✻ {text}[/dim italic]")
 
 
-def _flush_cli_reasoning(
-    reasoning_buffer: _ReasoningBuffer,
-    thinking: ThinkingSpinner | None,
-    renderer: StreamRenderer | None = None,
-) -> None:
-    text = reasoning_buffer.flush()
-    if text:
-        _print_cli_reasoning(text, thinking, renderer)
+def _print_cli_reasoning(text: str, thinking: ThinkingSpinner | None, renderer: StreamRenderer | None = None) -> None:
+    """Accumulate reasoning tokens and flush on sentence / line boundaries.
+
+    Without buffering, each streaming delta (often a single token) would be
+    printed as a separate ``✻`` line.  This version groups tokens into
+    natural chunks visible in the terminal.
+    """
+    global _reasoning_buf
+    if not text:
+        return
+    _reasoning_buf += text
+
+    # Flush on newline, sentence-ending punctuation, or when the chunk is
+    # long enough to wrap meaningfully at typical terminal widths.
+    if (
+        text.endswith("\n")
+        or any(text.rstrip().endswith(p) for p in (".", "!", "?", "。", "！", "？"))
+        or len(_reasoning_buf) >= 60
+    ):
+        _flush_reasoning(thinking, renderer)
 
 
 async def _print_interactive_progress_line(text: str, thinking: ThinkingSpinner | None, renderer: StreamRenderer | None = None) -> None:
@@ -313,7 +303,6 @@ async def _maybe_print_interactive_progress(
     thinking: ThinkingSpinner | None,
     channels_config: Any,
     renderer: StreamRenderer | None = None,
-    reasoning_buffer: _ReasoningBuffer | None = None,
 ) -> bool:
     metadata = msg.metadata or {}
     if metadata.get("_retry_wait"):
@@ -323,24 +312,17 @@ async def _maybe_print_interactive_progress(
     if not metadata.get("_progress"):
         return False
 
-    reasoning_buffer = reasoning_buffer or _ReasoningBuffer()
-
+    # Flush reasoning buffer when the reasoning stream ends (bus path).
     if metadata.get("_reasoning_end"):
-        if channels_config and not channels_config.show_reasoning:
-            reasoning_buffer.clear()
-        else:
-            _flush_cli_reasoning(reasoning_buffer, thinking, renderer)
+        _flush_reasoning(thinking, renderer)
         return True
 
     is_tool_hint = metadata.get("_tool_hint", False)
     is_reasoning = metadata.get("_reasoning", False) or metadata.get("_reasoning_delta", False)
     if is_reasoning:
         if channels_config and not channels_config.show_reasoning:
-            reasoning_buffer.clear()
             return True
-        text = reasoning_buffer.add(msg.content)
-        if text:
-            _print_cli_reasoning(text, thinking, renderer)
+        _print_cli_reasoning(msg.content, thinking, renderer)
         return True
     if channels_config and is_tool_hint and not channels_config.send_tool_hints:
         return True
@@ -968,7 +950,8 @@ def _run_gateway(
     hb_cfg = config.gateway.heartbeat
     heartbeat = HeartbeatService(
         workspace=config.workspace_path,
-        llm_runtime=agent.llm_runtime,
+        provider=agent.provider,
+        model=agent.model,
         on_execute=on_heartbeat_execute,
         on_notify=on_heartbeat_notify,
         interval_s=hb_cfg.interval_s,
@@ -1029,7 +1012,7 @@ def _run_gateway(
         console.print(f"[green]✓[/green] Health endpoint: http://{host}:{health_port}/health")
         async with server:
             await server.serve_forever()
-    # Register Dream system job (idempotent on restart)
+    # Register Dream system job (always-on, idempotent on restart)
     dream_cfg = config.agents.defaults.dream
     if dream_cfg.model_override:
         agent.dream.model = dream_cfg.model_override
@@ -1160,25 +1143,18 @@ def agent(
     _thinking: ThinkingSpinner | None = None
 
     def _make_progress(renderer: StreamRenderer | None = None):
-        reasoning_buffer = _ReasoningBuffer()
-
         async def _cli_progress(content: str, *, tool_hint: bool = False, reasoning: bool = False, **_kwargs: Any) -> None:
             ch = agent_loop.channels_config
 
+            # Flush remaining reasoning buffer when the stream ends.
             if _kwargs.get("reasoning_end"):
-                if ch and not ch.show_reasoning:
-                    reasoning_buffer.clear()
-                else:
-                    _flush_cli_reasoning(reasoning_buffer, _thinking, renderer)
+                _flush_reasoning(_thinking, renderer)
                 return
 
             if reasoning:
                 if ch and not ch.show_reasoning:
-                    reasoning_buffer.clear()
                     return
-                text = reasoning_buffer.add(content)
-                if text:
-                    _print_cli_reasoning(text, _thinking, renderer)
+                _print_cli_reasoning(content, _thinking, renderer)
                 return
             if ch and tool_hint and not ch.send_tool_hints:
                 return
@@ -1249,7 +1225,6 @@ def agent(
             turn_done.set()
             turn_response: list[tuple[str, dict]] = []
             renderer: StreamRenderer | None = None
-            reasoning_buffer = _ReasoningBuffer()
 
             async def _consume_outbound():
                 while True:
@@ -1275,7 +1250,6 @@ def agent(
                             renderer,
                             agent_loop.channels_config,
                             renderer,
-                            reasoning_buffer,
                         ):
                             continue
 
@@ -1316,7 +1290,6 @@ def agent(
 
                         turn_done.clear()
                         turn_response.clear()
-                        reasoning_buffer.clear()
                         renderer = StreamRenderer(
                             render_markdown=markdown,
                             bot_name=config.agents.defaults.bot_name,
