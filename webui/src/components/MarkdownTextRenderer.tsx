@@ -2,12 +2,10 @@ import { Children, isValidElement, useMemo } from "react";
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
-import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
 import { CodeBlock } from "@/components/CodeBlock";
-import { FileReferenceChip, isLikelyFilePath } from "@/components/FileReferenceChip";
 import { cn } from "@/lib/utils";
 
 import "katex/dist/katex.min.css";
@@ -18,7 +16,7 @@ interface MarkdownTextRendererProps {
   highlightCode?: boolean;
 }
 
-const remarkPlugins = [remarkBreaks, remarkGfm, remarkMath];
+const remarkPlugins = [remarkGfm, remarkMath];
 const rehypePlugins = [rehypeKatex];
 
 /**
@@ -46,9 +44,6 @@ export default function MarkdownTextRenderer({
           );
         }
         const raw = String(kids).replace(/\n$/, "");
-        if (isLikelyFilePath(raw)) {
-          return <FileReferenceChip path={raw} />;
-        }
         /** Plain fenced ``` blocks (no language) & wide one-liners: block monospace, not inline pill. */
         const widePlainBlock = raw.includes("\n") || raw.length > 120;
         if (widePlainBlock) {
@@ -107,46 +102,6 @@ export default function MarkdownTextRenderer({
           >
             {markdownChildren}
           </a>
-        );
-      },
-      img({ src, alt, node: _node, className: imgClassName, ...props }) {
-        void _node;
-        const source = typeof src === "string" ? src : "";
-        if (!source) return null;
-        const label = typeof alt === "string" ? alt : "";
-        return (
-          <span
-            className={cn(
-              "not-prose my-3 block w-fit max-w-full overflow-hidden rounded-[14px]",
-              "border border-border/70 bg-background shadow-sm",
-            )}
-          >
-            <a
-              href={source}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="block bg-muted/20"
-              aria-label={label ? `Open ${label}` : "Open image"}
-            >
-              <img
-                src={source}
-                alt={label}
-                loading="lazy"
-                decoding="async"
-                draggable={false}
-                className={cn(
-                  "block h-auto max-h-[34rem] max-w-full bg-background object-contain",
-                  imgClassName,
-                )}
-                {...props}
-              />
-            </a>
-            {label ? (
-              <span className="block max-w-full truncate px-3 py-2 text-xs text-muted-foreground">
-                {label}
-              </span>
-            ) : null}
-          </span>
         );
       },
     }),
