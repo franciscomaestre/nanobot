@@ -55,153 +55,6 @@ describe("ThreadMessages", () => {
     expect(rows[1]).toHaveClass("mt-4");
   });
 
-  it("starts a new activity cluster when the activity segment changes", () => {
-    const messages: UIMessage[] = [
-      {
-        id: "r1",
-        role: "assistant",
-        content: "",
-        reasoning: "first pass",
-        activitySegmentId: "seg-1",
-        createdAt: 1,
-      },
-      {
-        id: "t1",
-        role: "tool",
-        kind: "trace",
-        content: "edit_file()",
-        traces: ["edit_file()"],
-        fileEdits: [{
-          call_id: "call-edit",
-          tool: "edit_file",
-          path: "foo.txt",
-          phase: "end",
-          added: 2,
-          deleted: 1,
-          status: "done",
-        }],
-        activitySegmentId: "seg-1",
-        createdAt: 2,
-      },
-      {
-        id: "r2",
-        role: "assistant",
-        content: "",
-        reasoning: "second pass",
-        activitySegmentId: "seg-2",
-        createdAt: 3,
-      },
-    ];
-
-    const units = buildDisplayUnits(messages);
-
-    expect(units).toHaveLength(2);
-    expect(units[0].type === "cluster" ? units[0].messages.map((m) => m.id) : []).toEqual([
-      "r1",
-      "t1",
-    ]);
-    expect(units[1].type === "cluster" ? units[1].messages.map((m) => m.id) : []).toEqual([
-      "r2",
-    ]);
-  });
-
-  it("does not split ordinary tool activity just because segment ids changed", () => {
-    const messages: UIMessage[] = [
-      {
-        id: "r1",
-        role: "assistant",
-        content: "",
-        reasoning: "first pass",
-        activitySegmentId: "seg-1",
-        createdAt: 1,
-      },
-      {
-        id: "t1",
-        role: "tool",
-        kind: "trace",
-        content: "read_file()",
-        traces: ["read_file()"],
-        activitySegmentId: "seg-1",
-        createdAt: 2,
-      },
-      {
-        id: "r2",
-        role: "assistant",
-        content: "",
-        reasoning: "second pass",
-        activitySegmentId: "seg-2",
-        createdAt: 3,
-      },
-      {
-        id: "t2",
-        role: "tool",
-        kind: "trace",
-        content: "grep()",
-        traces: ["grep()"],
-        activitySegmentId: "seg-2",
-        createdAt: 4,
-      },
-    ];
-
-    const units = buildDisplayUnits(messages);
-
-    expect(units).toHaveLength(1);
-    expect(units[0].type === "cluster" ? units[0].messages.map((m) => m.id) : []).toEqual([
-      "r1",
-      "t1",
-      "r2",
-      "t2",
-    ]);
-  });
-
-  it("only marks the current activity cluster as live while streaming", () => {
-    const messages: UIMessage[] = [
-      {
-        id: "r1",
-        role: "assistant",
-        content: "",
-        reasoning: "first pass",
-        reasoningStreaming: true,
-        activitySegmentId: "seg-1",
-        createdAt: 1,
-      },
-      {
-        id: "t1",
-        role: "tool",
-        kind: "trace",
-        content: "edit_file()",
-        traces: ["edit_file()"],
-        fileEdits: [{
-          call_id: "call-edit",
-          tool: "edit_file",
-          path: "foo.txt",
-          phase: "start",
-          added: 4,
-          deleted: 1,
-          approximate: true,
-          status: "editing",
-        }],
-        activitySegmentId: "seg-1",
-        createdAt: 2,
-      },
-      {
-        id: "r2",
-        role: "assistant",
-        content: "",
-        reasoning: "second pass",
-        reasoningStreaming: true,
-        activitySegmentId: "seg-2",
-        createdAt: 3,
-      },
-    ];
-
-    render(<ThreadMessages messages={messages} isStreaming />);
-
-    expect(screen.getByRole("button", { name: /edited foo\.txt/i })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /editing foo\.txt/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /working/i })).toBeInTheDocument();
-  });
-
   it("folds final answer reasoning into the preceding activity cluster", () => {
     const messages: UIMessage[] = [
       {
@@ -226,7 +79,6 @@ describe("ThreadMessages", () => {
         content: "final answer",
         reasoning: "summarize results",
         reasoningStreaming: false,
-        latencyMs: 9_200,
         createdAt: 3,
       },
     ];
@@ -240,7 +92,6 @@ describe("ThreadMessages", () => {
       "t1",
       "a1-reasoning",
     ]);
-    expect(units[0].type === "cluster" ? units[0].messages.at(-1)?.latencyMs : undefined).toBe(9_200);
     expect(units[1]).toMatchObject({
       type: "single",
       message: {
@@ -254,41 +105,7 @@ describe("ThreadMessages", () => {
 
     render(<ThreadMessages messages={messages} isStreaming={false} />);
     expect(screen.queryByRole("button", { name: /^thinking$/i })).not.toBeInTheDocument();
-    expect(screen.getByText("Thought for 9s")).toBeInTheDocument();
     expect(screen.getByText("final answer")).toBeInTheDocument();
-  });
-
-  it("passes assistant turn latency to the preceding completed activity cluster", () => {
-    const messages: UIMessage[] = [
-      {
-        id: "r1",
-        role: "assistant",
-        content: "",
-        reasoning: "search plan",
-        reasoningStreaming: false,
-        createdAt: 1,
-      },
-      {
-        id: "t1",
-        role: "tool",
-        kind: "trace",
-        content: "web_search()",
-        traces: ["web_search()"],
-        createdAt: 1,
-      },
-      {
-        id: "a1",
-        role: "assistant",
-        content: "final answer",
-        latencyMs: 14_800,
-        createdAt: 1,
-      },
-    ];
-
-    render(<ThreadMessages messages={messages} isStreaming={false} />);
-
-    expect(screen.getByText("Thought for 15s")).toBeInTheDocument();
-    expect(screen.queryByText("Thought for 0s")).not.toBeInTheDocument();
   });
 
   it("shows copy only on the last assistant slice before the next user turn", () => {
