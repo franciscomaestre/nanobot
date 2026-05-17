@@ -2,25 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useClient } from "@/providers/ClientProvider";
 import { toMediaAttachment } from "@/lib/media";
-import {
-  mergeToolProgressEvents,
-  mergeUniqueToolTraceLines,
-  normalizeToolProgressEvents,
-  toolTraceLinesFromEvents,
-} from "@/lib/tool-traces";
+import { toolTraceLinesFromEvents } from "@/lib/tool-traces";
 import type { StreamError } from "@/lib/nanobot-client";
 import type {
   InboundEvent,
-  OutboundCliAppMention,
   OutboundImageGeneration,
-  OutboundMcpPresetMention,
   OutboundMedia,
   GoalStateWsPayload,
-  ToolProgressEvent,
   UIImage,
   UIFileEdit,
   UIMessage,
-  WorkspaceScopePayload,
 } from "@/lib/types";
 
 interface StreamBuffer {
@@ -36,8 +27,6 @@ interface ActiveAssistantCursor {
 type PendingStreamEvent =
   | { kind: "delta"; text: string }
   | { kind: "reasoning"; text: string };
-
-const FILE_EDIT_TOOL_NAMES = new Set(["write_file", "edit_file", "apply_patch"]);
 
 /** Find a still-open streamed assistant turn. Closed stream segments stay visible
  * as streaming until ``turn_end`` for visual continuity, but they must not
@@ -226,114 +215,18 @@ function absorbCompleteAssistantMessage(
 }
 
 function fileEditKey(edit: Pick<UIFileEdit, "call_id" | "tool" | "path">): string {
-  if (edit.call_id) return `${edit.call_id}|${edit.tool}`;
-  return `${edit.tool}|${edit.path}`;
-}
-
-function toolEventFileEditKey(event: ToolProgressEvent): string | null {
-  const fn = (event as { function?: { name?: unknown } }).function;
-  const name = typeof event.name === "string"
-    ? event.name
-    : typeof fn?.name === "string"
-      ? fn.name
-      : "";
-  const callId = typeof event.call_id === "string" ? event.call_id : "";
-  if (!name || !callId || !FILE_EDIT_TOOL_NAMES.has(name)) return null;
-  return `${callId}|${name}`;
-}
-
-function hasFileEditForToolEvent(messages: UIMessage[], event: ToolProgressEvent): boolean {
-  const key = toolEventFileEditKey(event);
-  if (!key) return false;
-  return messages.some((message) =>
-    message.fileEdits?.some((edit) => fileEditKey(edit) === key),
-  );
-}
-
-function filterCoveredFileEditToolEvents(
-  messages: UIMessage[],
-  events: ToolProgressEvent[],
-): ToolProgressEvent[] {
-  if (events.length === 0) return events;
-  return events.filter((event) => !hasFileEditForToolEvent(messages, event));
-}
-
-function stripCoveredFileEditToolHints(message: UIMessage, edits: UIFileEdit[]): UIMessage {
-  const incomingKeys = new Set(edits.map(fileEditKey));
-  const events = message.toolEvents ?? [];
-  if (!events.length || incomingKeys.size === 0) return message;
-
-  const removedTraceLines = new Set<string>();
-  const keptEvents: ToolProgressEvent[] = [];
-  let changed = false;
-  for (const event of events) {
-    const key = toolEventFileEditKey(event);
-    if (key && incomingKeys.has(key)) {
-      changed = true;
-      for (const line of toolTraceLinesFromEvents([event])) {
-        removedTraceLines.add(line);
-      }
-      continue;
-    }
-    keptEvents.push(event);
-  }
-  if (!changed) return message;
-
-  const previousTraces = message.traces?.length
-    ? message.traces
-    : message.content
-      ? [message.content]
-      : [];
-  const nextTraces = previousTraces.filter((line) => !removedTraceLines.has(line));
-  return {
-    ...message,
-    traces: nextTraces,
-    content: nextTraces[nextTraces.length - 1] ?? "",
-    toolEvents: keptEvents.length ? keptEvents : undefined,
-  };
-}
-
-function demoteInterruptedAssistantToActivity(
-  prev: UIMessage[],
-  segmentId: string,
-): UIMessage[] {
-  for (let i = prev.length - 1; i >= 0; i -= 1) {
-    const message = prev[i];
-    if (message.role === "user") break;
-    if (
-      message.role !== "assistant"
-      || message.kind === "trace"
-      || !message.isStreaming
-      || !message.content.trim()
-      || message.media?.length
-    ) {
-      continue;
-    }
-    const reasoning = [message.reasoning, message.content]
-      .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
-      .join("\n\n");
-    const demoted: UIMessage = {
-      ...message,
-      content: "",
-      reasoning,
-      reasoningStreaming: false,
-      isStreaming: false,
-      activitySegmentId: message.activitySegmentId ?? segmentId,
-    };
-    return replaceMessageAt(prev, i, demoted);
-  }
-  return prev;
+  return `${edit.call_id}|${edit.tool}|${edit.path}`;
 }
 
 function normalizeFileEdit(edit: UIFileEdit): UIFileEdit | null {
-  if (!edit || !edit.tool || (!edit.path && !edit.pending)) return null;
+  if (!edit || !edit.path || !edit.tool) return null;
   const inferredStatus =
     edit.phase === "error"
       ? "error"
       : edit.phase === "end"
         ? "done"
         : "editing";
-  const normalized: UIFileEdit = {
+  return {
     ...edit,
     call_id: edit.call_id || `${edit.tool}:${edit.path}`,
     added: Number.isFinite(edit.added) ? Math.max(0, Math.round(edit.added)) : 0,
@@ -342,8 +235,6 @@ function normalizeFileEdit(edit: UIFileEdit): UIFileEdit | null {
       ? edit.status
       : inferredStatus,
   };
-  if (edit.pending && !edit.path) normalized.pending = true;
-  return normalized;
 }
 
 function mergeFileEdits(existing: UIFileEdit[] | undefined, incoming: UIFileEdit[]): UIFileEdit[] {
@@ -359,33 +250,9 @@ function mergeFileEdits(existing: UIFileEdit[] | undefined, incoming: UIFileEdit
       next.push(edit);
       continue;
     }
-    const merged = { ...next[existingIndex], ...edit };
-    if (edit.path && !edit.pending) delete merged.pending;
-    next[existingIndex] = merged;
+    next[existingIndex] = { ...next[existingIndex], ...edit };
   }
   return next;
-}
-
-function findFileEditTraceIndex(
-  prev: UIMessage[],
-  segmentId: string | null,
-  incoming: UIFileEdit[],
-): number | null {
-  const incomingKeys = new Set(incoming.map(fileEditKey));
-  for (let i = prev.length - 1; i >= 0; i -= 1) {
-    const candidate = prev[i];
-    if (candidate.role === "user") break;
-    if (candidate.kind !== "trace") continue;
-    if (segmentId && candidate.activitySegmentId === segmentId) return i;
-    for (const existing of candidate.fileEdits ?? []) {
-      if (incomingKeys.has(fileEditKey(existing))) return i;
-    }
-    for (const event of candidate.toolEvents ?? []) {
-      const key = toolEventFileEditKey(event);
-      if (key && incomingKeys.has(key)) return i;
-    }
-  }
-  return null;
 }
 
 /**
@@ -407,9 +274,6 @@ export interface SendImage {
 
 export interface SendOptions {
   imageGeneration?: OutboundImageGeneration;
-  cliApps?: OutboundCliAppMention[];
-  mcpPresets?: OutboundMcpPresetMention[];
-  workspaceScope?: WorkspaceScopePayload | null;
 }
 
 export function useNanobotStream(
@@ -517,12 +381,7 @@ export function useNanobotStream(
     const cursor = activeAssistantRef.current;
     if (!cursor) return null;
     const indexed = prev[cursor.index];
-    if (
-      indexed?.id === cursor.id
-      && indexed.role === "assistant"
-      && indexed.kind !== "trace"
-      && indexed.isStreaming
-    ) {
+    if (indexed?.id === cursor.id && indexed.role === "assistant" && indexed.kind !== "trace") {
       return cursor.index;
     }
     const idx = prev.findIndex((m) => m.id === cursor.id);
@@ -531,7 +390,7 @@ export function useNanobotStream(
       return null;
     }
     const found = prev[idx];
-    if (found.role !== "assistant" || found.kind === "trace" || !found.isStreaming) {
+    if (found.role !== "assistant" || found.kind === "trace") {
       activeAssistantRef.current = null;
       return null;
     }
@@ -600,53 +459,23 @@ export function useNanobotStream(
     [appendAnswerChunk, ensureActivitySegmentId],
   );
 
-  const flushPendingStreamEvents = useCallback((options?: {
-    closeAnswerSegment?: boolean;
-    finalAnswerText?: string;
-  }) => {
+  const flushPendingStreamEvents = useCallback((options?: { closeAnswerSegment?: boolean }) => {
     if (streamFrameRef.current !== null) {
       window.cancelAnimationFrame(streamFrameRef.current);
       streamFrameRef.current = null;
     }
     const events = pendingStreamEventsRef.current;
-    const finalAnswerText = options?.finalAnswerText;
-    if (events.length === 0 && finalAnswerText === undefined) {
+    if (events.length === 0) {
       if (options?.closeAnswerSegment) closeActiveAssistantStream();
       return;
     }
     pendingStreamEventsRef.current = [];
     setMessages((prev) => {
-      let next = events.length > 0 ? applyPendingStreamEvents(prev, events) : prev;
-      if (finalAnswerText !== undefined) {
-        const targetIndex =
-          resolveActiveAssistantIndex(next)
-          ?? findStreamingAssistantIndex(next, closedAssistantStreamIdsRef.current);
-          if (targetIndex !== null) {
-            const target = next[targetIndex];
-            next = replaceMessageAt(next, targetIndex, {
-              ...target,
-              content: finalAnswerText,
-              isStreaming: true,
-            });
-          } else {
-            const id = crypto.randomUUID();
-            closedAssistantStreamIdsRef.current.add(id);
-            next = [
-              ...next,
-              {
-                id,
-                role: "assistant",
-                content: finalAnswerText,
-                isStreaming: true,
-                createdAt: Date.now(),
-              },
-            ];
-          }
-        }
+      const next = applyPendingStreamEvents(prev, events);
       if (options?.closeAnswerSegment) closeActiveAssistantStream();
       return next;
     });
-  }, [applyPendingStreamEvents, closeActiveAssistantStream, resolveActiveAssistantIndex]);
+  }, [applyPendingStreamEvents, closeActiveAssistantStream]);
 
   const schedulePendingStreamFlush = useCallback(() => {
     if (streamFrameRef.current !== null) return;
@@ -705,7 +534,6 @@ export function useNanobotStream(
         if (suppressStreamUntilTurnEndRef.current) return;
         const chunk = typeof ev.text === "string" ? ev.text : "";
         if (!chunk) return;
-        clearActivitySegment();
         setIsStreaming(true);
         pendingStreamEventsRef.current.push({ kind: "delta", text: chunk });
         schedulePendingStreamFlush();
@@ -716,7 +544,6 @@ export function useNanobotStream(
         if (suppressStreamUntilTurnEndRef.current) return;
         const chunk = ev.text;
         if (!chunk) return;
-        if (fileEditSegmentRef.current) clearActivitySegment();
         setIsStreaming(true);
         pendingStreamEventsRef.current.push({ kind: "reasoning", text: chunk });
         schedulePendingStreamFlush();
@@ -724,10 +551,7 @@ export function useNanobotStream(
       }
 
       if (ev.event === "stream_end") {
-        flushPendingStreamEvents({
-          closeAnswerSegment: true,
-          ...(typeof ev.text === "string" ? { finalAnswerText: ev.text } : {}),
-        });
+        flushPendingStreamEvents({ closeAnswerSegment: true });
         if (suppressStreamUntilTurnEndRef.current) return;
         // stream_end only means the text segment finished — the model may
         // still be executing tools.  Do NOT reset isStreaming here; the
@@ -761,7 +585,6 @@ export function useNanobotStream(
         if ("goal_state" in ev && ev.goal_state != null && typeof ev.goal_state === "object") {
           setGoalState(ev.goal_state);
         }
-        setRunStartedAt(null);
         // Definitive signal that the turn is fully complete.  Cancel any
         // pending debounce timer and stop the loading indicator immediately.
         if (streamEndTimerRef.current !== null) {
@@ -799,7 +622,6 @@ export function useNanobotStream(
         if (ev.kind === "reasoning") {
           const line = ev.text;
           if (!line) return;
-          if (fileEditSegmentRef.current) clearActivitySegment();
           setMessages((prev) => closeReasoningStream(attachReasoningChunk(prev, line, {
             ensure: ensureActivitySegmentId,
           })));
@@ -809,21 +631,16 @@ export function useNanobotStream(
         // Attach them to the last trace row if it was the last emitted item
         // so a sequence of calls collapses into one compact trace group.
         if (ev.kind === "tool_hint" || ev.kind === "progress") {
-          const structuredEvents = normalizeToolProgressEvents(ev.tool_events);
+          const structuredLines = toolTraceLinesFromEvents(ev.tool_events);
+          const lines = structuredLines.length > 0
+            ? structuredLines
+            : ev.text
+              ? [ev.text]
+              : [];
+          if (lines.length === 0) return;
           setMessages((prev) => {
             const segmentId = ensureActivitySegmentId();
-            const base = demoteInterruptedAssistantToActivity(prev, segmentId);
-            const visibleStructuredEvents = filterCoveredFileEditToolEvents(base, structuredEvents);
-            const structuredLines = toolTraceLinesFromEvents(visibleStructuredEvents);
-            const lines = structuredLines.length > 0
-              ? structuredLines
-              : structuredEvents.length > 0
-                ? []
-                : ev.text
-                  ? [ev.text]
-                  : [];
-            if (lines.length === 0) return base;
-            const last = base[base.length - 1];
+            const last = prev[prev.length - 1];
             if (
               last
               && last.kind === "trace"
@@ -835,31 +652,22 @@ export function useNanobotStream(
                 : last.content
                   ? [last.content]
                   : [];
-              const mergedLines = visibleStructuredEvents.length > 0
-                ? mergeUniqueToolTraceLines(previousTraces, structuredLines)
-                : null;
               const merged: UIMessage = {
                 ...last,
-                traces: mergedLines ? mergedLines.traces : [...previousTraces, ...lines],
-                content: mergedLines
-                  ? mergedLines.traces[mergedLines.traces.length - 1]
-                  : lines[lines.length - 1],
-                toolEvents: visibleStructuredEvents.length
-                  ? mergeToolProgressEvents(last.toolEvents, visibleStructuredEvents)
-                  : last.toolEvents,
+                traces: [...previousTraces, ...lines],
+                content: lines[lines.length - 1],
                 activitySegmentId: last.activitySegmentId ?? segmentId,
               };
-              return [...base.slice(0, -1), merged];
+              return [...prev.slice(0, -1), merged];
             }
             return [
-              ...base,
+              ...prev,
               {
                 id: crypto.randomUUID(),
                 role: "tool",
                 kind: "trace",
                 content: lines[lines.length - 1],
                 traces: lines,
-                ...(visibleStructuredEvents.length ? { toolEvents: visibleStructuredEvents } : {}),
                 activitySegmentId: segmentId,
                 createdAt: Date.now(),
               },
@@ -877,7 +685,6 @@ export function useNanobotStream(
         // flight, drop the placeholder so we don't render the text twice.
         // Do NOT reset isStreaming here — only ``turn_end`` signals that
         // the full turn (all tool calls + final text) is complete.
-        clearActivitySegment();
         setMessages((prev) => {
           const activeId = buffer.current?.messageId;
           buffer.current = null;
@@ -902,43 +709,36 @@ export function useNanobotStream(
       if (ev.event === "file_edit") {
         const edits = Array.isArray(ev.edits) ? ev.edits : [];
         if (edits.length === 0) return;
-        const normalized = mergeFileEdits(undefined, edits);
-        if (normalized.length === 0) return;
-        const opensFileEditPhase = normalized.some(
-          (edit) => edit.status === "editing" || edit.phase === "start",
-        );
-        let eventSegmentId = fileEditSegmentRef.current;
-        if (!eventSegmentId && opensFileEditPhase) {
-          eventSegmentId = detachedActivitySegmentId();
-          fileEditSegmentRef.current = eventSegmentId;
-        }
         setMessages((prev) => {
-          let segmentId = eventSegmentId;
-          const base = segmentId ? demoteInterruptedAssistantToActivity(prev, segmentId) : prev;
-          const targetIndex = findFileEditTraceIndex(base, segmentId, normalized);
-          if (targetIndex !== null) {
-            const target = base[targetIndex];
-            segmentId = target.activitySegmentId ?? segmentId ?? detachedActivitySegmentId();
-            if (opensFileEditPhase) fileEditSegmentRef.current = segmentId;
-            const cleanedTarget = stripCoveredFileEditToolHints(target, normalized);
-            const merged: UIMessage = {
-              ...cleanedTarget,
-              fileEdits: mergeFileEdits(cleanedTarget.fileEdits, normalized),
-              activitySegmentId: segmentId,
-            };
-            return replaceMessageAt(base, targetIndex, merged);
+          const last = prev[prev.length - 1];
+          let segmentId = fileEditSegmentRef.current;
+          if (!segmentId || !(last?.kind === "trace" && last.fileEdits?.length)) {
+            segmentId = detachedActivitySegmentId();
+            fileEditSegmentRef.current = segmentId;
           }
-          segmentId = segmentId ?? detachedActivitySegmentId();
-          if (opensFileEditPhase) fileEditSegmentRef.current = segmentId;
+          if (
+            last
+            && last.kind === "trace"
+            && !last.isStreaming
+            && !!last.fileEdits?.length
+            && last.activitySegmentId === segmentId
+          ) {
+            const merged: UIMessage = {
+              ...last,
+              fileEdits: mergeFileEdits(last.fileEdits, edits),
+              activitySegmentId: last.activitySegmentId ?? segmentId,
+            };
+            return [...prev.slice(0, -1), merged];
+          }
           return [
-            ...base,
+            ...prev,
             {
               id: crypto.randomUUID(),
               role: "tool",
               kind: "trace",
               content: "",
               traces: [],
-              fileEdits: normalized,
+              fileEdits: mergeFileEdits(undefined, edits),
               activitySegmentId: segmentId,
               createdAt: Date.now(),
             },
@@ -998,8 +798,6 @@ export function useNanobotStream(
             content,
             createdAt: Date.now(),
             ...(previews ? { images: previews } : {}),
-            ...(options?.cliApps?.length ? { cliApps: options.cliApps } : {}),
-            ...(options?.mcpPresets?.length ? { mcpPresets: options.mcpPresets } : {}),
           },
         ];
       });
