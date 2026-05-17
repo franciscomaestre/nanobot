@@ -81,14 +81,6 @@
 }
 
 @layer utilities {
-  .host-drag-region {
-    -webkit-app-region: drag;
-  }
-
-  .host-no-drag {
-    -webkit-app-region: no-drag;
-  }
-
   .shadow-inner-right {
     box-shadow: inset -9px 0 6px -1px rgb(0 0 0 / 0.02);
   }
@@ -138,9 +130,6 @@
   .streaming-text-sheen {
     position: relative;
     color: hsl(var(--muted-foreground));
-  }
-  .file-reference-sheen {
-    color: inherit;
   }
   .streaming-text-sheen::after {
     content: attr(data-sheen-text);
@@ -221,52 +210,6 @@
     }
     .dark .goal-shell-glow {
       filter: drop-shadow(0 0 14px hsl(198 88% 70% / 0.32));
-    }
-  }
-
-  @keyframes cli-app-linked-sheen {
-    0% {
-      transform: translateX(-140%) skewX(-14deg);
-      opacity: 0;
-    }
-    18% {
-      opacity: 0.7;
-    }
-    72%,
-    100% {
-      transform: translateX(140%) skewX(-14deg);
-      opacity: 0;
-    }
-  }
-  .cli-app-linked-chip::after {
-    content: "";
-    position: absolute;
-    inset: -1px;
-    pointer-events: none;
-    background: linear-gradient(
-      90deg,
-      transparent 0%,
-      hsl(var(--foreground) / 0.14) 46%,
-      hsl(var(--background) / 0.7) 50%,
-      hsl(var(--foreground) / 0.12) 54%,
-      transparent 100%
-    );
-    animation: cli-app-linked-sheen 1.25s ease-out 1;
-  }
-  .dark .cli-app-linked-chip::after {
-    background: linear-gradient(
-      90deg,
-      transparent 0%,
-      hsl(var(--foreground) / 0.12) 46%,
-      hsl(var(--background) / 0.5) 50%,
-      hsl(var(--foreground) / 0.1) 54%,
-      transparent 100%
-    );
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .cli-app-linked-chip::after {
-      animation: none;
-      content: none;
     }
   }
 
