@@ -6,6 +6,8 @@ The feature is disabled by default. Enable it in `~/.nanobot/config.json`, confi
 
 ## Quick Setup
 
+OpenRouter example:
+
 ```json
 {
   "providers": {
@@ -17,13 +19,76 @@ The feature is disabled by default. Enable it in `~/.nanobot/config.json`, confi
     "imageGeneration": {
       "enabled": true,
       "provider": "openrouter",
-      "model": "openai/gpt-5.4-image-2"
+      "model": "openai/gpt-5.4-image-2",
+      "defaultAspectRatio": "1:1",
+      "defaultImageSize": "1K"
     }
   }
 }
 ```
 
-See [Provider Notes](#provider-notes) for AIHubMix, MiniMax, and Gemini configuration examples.
+AIHubMix example:
+
+```json
+{
+  "providers": {
+    "aihubmix": {
+      "apiKey": "${AIHUBMIX_API_KEY}"
+    }
+  },
+  "tools": {
+    "imageGeneration": {
+      "enabled": true,
+      "provider": "aihubmix",
+      "model": "gpt-image-2-free",
+      "defaultAspectRatio": "1:1",
+      "defaultImageSize": "1K"
+    }
+  }
+}
+```
+
+MiniMax example:
+
+```json
+{
+  "providers": {
+    "minimax": {
+      "apiKey": "${MINIMAX_API_KEY}"
+    }
+  },
+  "tools": {
+    "imageGeneration": {
+      "enabled": true,
+      "provider": "minimax",
+      "model": "image-01",
+      "defaultAspectRatio": "1:1"
+    }
+  }
+}
+```
+
+Gemini example (Imagen 4):
+
+```json
+{
+  "providers": {
+    "gemini": {
+      "apiKey": "${GEMINI_API_KEY}"
+    }
+  },
+  "tools": {
+    "imageGeneration": {
+      "enabled": true,
+      "provider": "gemini",
+      "model": "imagen-4.0-generate-001",
+      "defaultAspectRatio": "1:1"
+    }
+  }
+}
+```
+
+For Gemini Flash (which supports reference-image edits) see the [Gemini](#gemini) section below.
 
 > [!TIP]
 > Prefer environment variables for API keys. nanobot resolves `${VAR_NAME}` values from the environment at startup.
