@@ -8,7 +8,7 @@ import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from loguru import logger
 
@@ -19,8 +19,7 @@ from nanobot.utils.file_edit_events import (
     build_file_edit_end_event,
     build_file_edit_error_event,
     build_file_edit_start_event,
-    prepare_file_edit_tracker as _prepare_file_edit_tracker,
-    prepare_file_edit_trackers,
+    prepare_file_edit_tracker,
     StreamingFileEditTracker,
 )
 from nanobot.utils.helpers import (
@@ -42,7 +41,6 @@ from nanobot.utils.prompt_templates import render_template
 from nanobot.utils.runtime import (
     EMPTY_FINAL_RESPONSE_MESSAGE,
     build_finalization_retry_message,
-    build_goal_continue_message,
     build_length_recovery_message,
     ensure_nonempty_tool_result,
     is_blank_text,
@@ -51,10 +49,6 @@ from nanobot.utils.runtime import (
 )
 
 _DEFAULT_ERROR_MESSAGE = "Sorry, I encountered an error calling the AI model."
-_ARREARAGE_ERROR_MESSAGE = (
-    "The AI provider rejected the request because the API key is out of quota or the "
-    "account is in arrears. Please top up / check the billing status of your API key and try again."
-)
 _PERSISTED_MODEL_ERROR_PLACEHOLDER = "[Assistant reply unavailable due to model error.]"
 _MAX_EMPTY_RETRIES = 2
 _MAX_LENGTH_RECOVERIES = 3
@@ -64,14 +58,11 @@ _SNIP_SAFETY_BUFFER = 1024
 _MICROCOMPACT_KEEP_RECENT = 10
 _MICROCOMPACT_MIN_CHARS = 500
 _COMPACTABLE_TOOLS = frozenset({
-    "read_file", "exec", "grep", "find_files",
-    "web_search", "web_fetch", "list_dir", "list_exec_sessions",
+    "read_file", "exec", "grep",
+    "web_search", "web_fetch", "list_dir",
 })
 _BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
 
-# Backward-compatible module attribute for tests/extensions that monkeypatch
-# the former single-file tracker hook. Runtime uses prepare_file_edit_trackers.
-prepare_file_edit_tracker = _prepare_file_edit_tracker
 
 
 @dataclass(slots=True)
@@ -102,8 +93,6 @@ class AgentRunSpec:
     checkpoint_callback: Any | None = None
     injection_callback: Any | None = None
     llm_timeout_s: float | None = None
-    goal_active_predicate: Callable[[], bool] | None = None
-    goal_continue_message: str | None = None
 
 
 @dataclass(slots=True)
@@ -174,7 +163,6 @@ class AgentRunner:
         *,
         phase: str = "after error",
         iteration: int | None = None,
-        allow_goal_continue: bool = False,
     ) -> tuple[bool, int]:
         """Drain pending injections. Returns (should_continue, updated_cycles).
 
@@ -186,10 +174,6 @@ class AgentRunner:
         if injection_cycles >= _MAX_INJECTION_CYCLES:
             return False, injection_cycles
         injections = await self._drain_injections(spec)
-        if not injections and allow_goal_continue and assistant_message is not None:
-            predicate = spec.goal_active_predicate
-            if predicate is not None and predicate():
-                injections = [build_goal_continue_message(spec.goal_continue_message)]
         if not injections:
             return False, injection_cycles
         injection_cycles += 1
@@ -487,7 +471,6 @@ class AgentRunner:
                 spec, messages, assistant_message, injection_cycles,
                 phase="after final response",
                 iteration=iteration,
-                allow_goal_continue=True,
             )
             if should_continue:
                 had_injections = True
@@ -500,10 +483,7 @@ class AgentRunner:
                 continue
 
             if response.finish_reason == "error":
-                if LLMProvider.is_arrearage_response(response):
-                    final_content = _ARREARAGE_ERROR_MESSAGE
-                else:
-                    final_content = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
+                final_content = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
                 stop_reason = "error"
                 error = final_content
                 self._append_model_error_placeholder(messages)
@@ -877,8 +857,8 @@ class AgentRunner:
             and on_progress_accepts_file_edit_events(spec.progress_callback)
         )
         progress_callback = spec.progress_callback if emit_file_edit_events else None
-        file_edit_trackers = (
-            prepare_file_edit_trackers(
+        file_edit_tracker = (
+            prepare_file_edit_tracker(
                 call_id=tool_call.id,
                 tool_name=tool_call.name,
                 tool=tool,
@@ -888,13 +868,13 @@ class AgentRunner:
             if progress_callback is not None
             else None
         )
-        if file_edit_trackers and progress_callback is not None:
+        if file_edit_tracker is not None and progress_callback is not None:
             await invoke_file_edit_progress(
                 progress_callback,
                 [build_file_edit_start_event(
                     file_edit_tracker,
                     params if isinstance(params, dict) else None,
-                ) for file_edit_tracker in file_edit_trackers],
+                )],
             )
         try:
             if tool is not None:
@@ -904,13 +884,10 @@ class AgentRunner:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
-            if file_edit_trackers and progress_callback is not None:
+            if file_edit_tracker is not None and progress_callback is not None:
                 await invoke_file_edit_progress(
                     progress_callback,
-                    [
-                        build_file_edit_error_event(file_edit_tracker, str(exc))
-                        for file_edit_tracker in file_edit_trackers
-                    ],
+                    [build_file_edit_error_event(file_edit_tracker, str(exc))],
                 )
             event = {
                 "name": tool_call.name,
@@ -933,13 +910,10 @@ class AgentRunner:
             return payload, event, None
 
         if isinstance(result, str) and result.startswith("Error"):
-            if file_edit_trackers and progress_callback is not None:
+            if file_edit_tracker is not None and progress_callback is not None:
                 await invoke_file_edit_progress(
                     progress_callback,
-                    [
-                        build_file_edit_error_event(file_edit_tracker, result)
-                        for file_edit_tracker in file_edit_trackers
-                    ],
+                    [build_file_edit_error_event(file_edit_tracker, result)],
                 )
             event = {
                 "name": tool_call.name,
@@ -959,13 +933,13 @@ class AgentRunner:
                 return result + hint, event, RuntimeError(result)
             return result + hint, event, None
 
-        if file_edit_trackers and progress_callback is not None:
+        if file_edit_tracker is not None and progress_callback is not None:
             await invoke_file_edit_progress(
                 progress_callback,
                 [build_file_edit_end_event(
                     file_edit_tracker,
                     params if isinstance(params, dict) else None,
-                ) for file_edit_tracker in file_edit_trackers],
+                )],
             )
 
         detail = "" if result is None else str(result)
