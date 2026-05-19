@@ -15,9 +15,6 @@ import { Input } from "@/components/ui/input";
 interface RenameChatDialogProps {
   open: boolean;
   title: string;
-  dialogTitle?: string;
-  description?: string;
-  placeholder?: string;
   onCancel: () => void;
   onConfirm: (title: string) => void;
 }
@@ -25,9 +22,6 @@ interface RenameChatDialogProps {
 export function RenameChatDialog({
   open,
   title,
-  dialogTitle,
-  description,
-  placeholder,
   onCancel,
   onConfirm,
 }: RenameChatDialogProps) {
@@ -54,15 +48,15 @@ export function RenameChatDialog({
           }}
         >
           <DialogHeader className="text-left">
-            <DialogTitle>{dialogTitle ?? t("chat.renameTitle")}</DialogTitle>
+            <DialogTitle>{t("chat.renameTitle")}</DialogTitle>
             <DialogDescription>
-              {description ?? t("chat.renameDescription")}
+              {t("chat.renameDescription")}
             </DialogDescription>
           </DialogHeader>
           <Input
             value={value}
             onChange={(event) => setValue(event.target.value)}
-            placeholder={placeholder ?? t("chat.renamePlaceholder")}
+            placeholder={t("chat.renamePlaceholder")}
             autoFocus
             maxLength={160}
           />

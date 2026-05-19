@@ -4,7 +4,7 @@ import { DeleteConfirm } from "@/components/DeleteConfirm";
 import { RenameChatDialog } from "@/components/RenameChatDialog";
 import { Sidebar } from "@/components/Sidebar";
 import { SessionSearchDialog } from "@/components/SessionSearchDialog";
-import { SettingsView, type SettingsSectionKey } from "@/components/settings/SettingsView";
+import { SettingsView } from "@/components/settings/SettingsView";
 import { ThreadShell } from "@/components/thread/ThreadShell";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 
@@ -43,10 +43,9 @@ const SIDEBAR_STORAGE_KEY = "nanobot-webui.sidebar";
 const COMPLETED_RUNS_STORAGE_KEY = "nanobot-webui.sidebar.completed-runs.v1";
 const RESTART_STARTED_KEY = "nanobot-webui.restartStartedAt";
 const SIDEBAR_WIDTH = 272;
-const SIDEBAR_RAIL_WIDTH = 56;
 const TOKEN_REFRESH_MARGIN_MS = 30_000;
 const TOKEN_REFRESH_MIN_DELAY_MS = 5_000;
-type ShellView = "chat" | "settings" | "apps";
+type ShellView = "chat" | "settings";
 
 function bootstrapTokenExpiresAt(expiresInSeconds: number): number {
   return Date.now() + Math.max(0, expiresInSeconds) * 1000;
@@ -164,7 +163,8 @@ export default function App() {
           if (cancelled) return;
           if (secret) saveSecret(secret);
           const url = deriveWsUrl(boot.ws_path, boot.token);
-          const client = new NanobotClient({
+          let client: NanobotClient;
+          client = new NanobotClient({
             url,
             onReauth: async () => {
               try {
@@ -324,7 +324,6 @@ function Shell({
     useSidebarState(sessions, !loading);
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [view, setView] = useState<ShellView>("chat");
-  const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSectionKey>("overview");
   const [desktopSidebarOpen, setDesktopSidebarOpen] =
     useState<boolean>(readSidebarOpen);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -410,10 +409,6 @@ function Shell({
 
   const closeDesktopSidebar = useCallback(() => {
     setDesktopSidebarOpen(false);
-  }, []);
-
-  const openDesktopSidebar = useCallback(() => {
-    setDesktopSidebarOpen(true);
   }, []);
 
   const closeMobileSidebar = useCallback(() => {
@@ -565,21 +560,6 @@ function Shell({
     setSessionSearchOpen(true);
   }, []);
 
-  useEffect(() => {
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      const plainCommandK =
-        (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
-      if (!plainCommandK) return;
-      if (event.key.toLowerCase() !== "k") return;
-      event.preventDefault();
-      onOpenSessionSearch();
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onOpenSessionSearch]);
-
   const onSelectSearchResult = useCallback(
     (key: string) => {
       setSessionSearchOpen(false);
@@ -588,17 +568,9 @@ function Shell({
     [onSelectChat],
   );
 
-  const onOpenSettings = useCallback((section: SettingsSectionKey = "overview") => {
+  const onOpenSettings = useCallback(() => {
     setSessionSearchOpen(false);
-    setSettingsInitialSection(section);
     setView("settings");
-    setMobileSidebarOpen(false);
-  }, []);
-
-  const onOpenApps = useCallback(() => {
-    setSessionSearchOpen(false);
-    setSettingsInitialSection("apps");
-    setView("apps");
     setMobileSidebarOpen(false);
   }, []);
 
@@ -662,13 +634,12 @@ function Shell({
 
   useEffect(() => {
     return client.onStatus((status) => {
-      const startedAt = (() => {
-        try {
-          return Number(window.localStorage.getItem(RESTART_STARTED_KEY) ?? "0");
-        } catch {
-          return 0;
-        }
-      })();
+      let startedAt = 0;
+      try {
+        startedAt = Number(window.localStorage.getItem(RESTART_STARTED_KEY) ?? "0");
+      } catch {
+        startedAt = 0;
+      }
       if (!startedAt) return;
       if (status !== "open") {
         restartSawDisconnectRef.current = true;
@@ -720,12 +691,6 @@ function Shell({
       });
       return;
     }
-    if (view === "apps") {
-      document.title = t("app.documentTitle.chat", {
-        title: t("settings.nav.apps", { defaultValue: "Apps" }),
-      });
-      return;
-    }
     document.title = activeSession
       ? t("app.documentTitle.chat", { title: headerTitle })
       : t("app.documentTitle.base");
@@ -743,9 +708,7 @@ function Shell({
     onRequestRename,
     onToggleArchive,
     onOpenSettings,
-    onOpenApps,
     onOpenSearch: onOpenSessionSearch,
-    activeUtility: view === "apps" ? "apps" as const : null,
     onToggleArchived,
     onUpdateView: onUpdateSidebarView,
     pinnedKeys: sidebarState.pinned_keys,
@@ -769,19 +732,17 @@ function Shell({
               "relative z-20 hidden shrink-0 overflow-hidden lg:block",
               "transition-[width] duration-300 ease-out",
             )}
-            style={{
-              width: desktopSidebarOpen ? SIDEBAR_WIDTH : SIDEBAR_RAIL_WIDTH,
-            }}
+            style={{ width: desktopSidebarOpen ? SIDEBAR_WIDTH : 0 }}
           >
             <div
-              className="absolute inset-y-0 left-0 h-full w-full overflow-hidden bg-sidebar shadow-inner-right"
+              className={cn(
+                "absolute inset-y-0 left-0 h-full overflow-hidden bg-sidebar shadow-inner-right",
+                "transition-transform duration-300 ease-out",
+                desktopSidebarOpen ? "translate-x-0" : "-translate-x-full",
+              )}
+              style={{ width: SIDEBAR_WIDTH }}
             >
-              <Sidebar
-                {...sidebarProps}
-                collapsed={!desktopSidebarOpen}
-                onCollapse={closeDesktopSidebar}
-                onExpand={openDesktopSidebar}
-              />
+              <Sidebar {...sidebarProps} onCollapse={closeDesktopSidebar} />
             </div>
           </aside>
         ) : null}
@@ -808,21 +769,23 @@ function Shell({
           </Sheet>
         ) : null}
 
-        <SessionSearchDialog
-          open={sessionSearchOpen}
-          onOpenChange={setSessionSearchOpen}
-          sessions={sessions}
-          activeKey={activeKey}
-          loading={loading}
-          titleOverrides={sidebarState.title_overrides}
-          onSelect={onSelectSearchResult}
-        />
+        {showMainSidebar ? (
+          <SessionSearchDialog
+            open={sessionSearchOpen}
+            onOpenChange={setSessionSearchOpen}
+            sessions={sessions}
+            activeKey={activeKey}
+            loading={loading}
+            titleOverrides={sidebarState.title_overrides}
+            onSelect={onSelectSearchResult}
+          />
+        ) : null}
 
         <main className="relative flex h-full min-w-0 flex-1 flex-col">
           <div
             className={cn(
               "absolute inset-0 flex flex-col",
-              view !== "chat" && "invisible pointer-events-none",
+              view === "settings" && "invisible pointer-events-none",
             )}
           >
             <ThreadShell
@@ -834,15 +797,13 @@ function Shell({
               onTurnEnd={onTurnEnd}
               theme={theme}
               onToggleTheme={toggle}
-              hideSidebarToggleOnDesktop
+              hideSidebarToggleOnDesktop={desktopSidebarOpen}
             />
           </div>
-          {view !== "chat" && (
+          {view === "settings" && (
             <div className="absolute inset-0 flex flex-col">
               <SettingsView
                 theme={theme}
-                initialSection={settingsInitialSection}
-                showSidebar={view === "settings"}
                 onToggleTheme={toggle}
                 onBackToChat={onBackToChat}
                 onModelNameChange={onModelNameChange}

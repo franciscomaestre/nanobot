@@ -9,18 +9,6 @@
       "title": "Tidak dapat menjangkau nanobot",
       "gatewayHint": "Pastikan gateway sedang berjalan (`nanobot gateway`) dan halaman ini dibuka pada mesin yang sama."
     },
-    "auth": {
-      "title": "Autentikasi diperlukan",
-      "hint": "Masukkan secret yang dikonfigurasi sebagai tokenIssueSecret di konfigurasi gateway.",
-      "placeholder": "Kata sandi",
-      "submit": "Hubungkan",
-      "invalid": "Kata sandi tidak valid. Coba lagi."
-    },
-    "account": {
-      "section": "Akun",
-      "logoutHint": "Putuskan browser ini dari gateway.",
-      "logout": "Keluar"
-    },
     "system": {
       "section": "Sistem",
       "restartHint": "Mulai ulang nanobot untuk menerapkan perubahan runtime.",
@@ -39,13 +27,9 @@
     }
   },
   "sidebar": {
-    "navigation": "Navigasi bilah samping",
-    "globalActions": "Aksi global",
     "collapse": "Ciutkan sidebar",
     "toggleTheme": "Ganti tema",
-    "home": "Beranda",
     "newChat": "Obrolan baru",
-    "searchAria": "Cari",
     "viewOptions": "View",
     "compactList": "Compact list",
     "showPreviews": "Show previews",
@@ -54,16 +38,17 @@
     "sortUpdated": "Recently updated",
     "sortCreated": "Recently created",
     "sortTitle": "Title A-Z",
-    "searchPlaceholder": "Cari",
-    "searchResults": "Hasil",
-    "noSearchResults": "Tidak ada chat yang cocok.",
     "recent": "Terbaru",
     "refreshSessions": "Segarkan sesi",
     "settings": "Pengaturan",
     "language": {
       "label": "Bahasa",
       "ariaLabel": "Ganti bahasa"
-    }
+    },
+    "searchAria": "Cari",
+    "searchPlaceholder": "Cari",
+    "searchResults": "Hasil",
+    "noSearchResults": "Tidak ada chat yang cocok."
   },
   "settings": {
     "backToChat": "Kembali ke obrolan",
@@ -90,13 +75,10 @@
       "status": "Status",
       "localPreferences": "Local preferences",
       "presets": "Presets",
-      "imageGeneration": "Pembuatan gambar",
-      "imageDefaults": "Default",
       "webSearch": "Web search",
       "webBehavior": "Behavior",
       "identity": "Identity",
       "safety": "Safety",
-      "capabilities": "Kapabilitas",
       "integrations": "Integrations"
     },
     "rows": {
@@ -109,7 +91,6 @@
       "activePreset": "Active preset",
       "gateway": "Gateway",
       "restartState": "Restart state",
-      "pendingChanges": "Perubahan tertunda",
       "selectedPreset": "Selected preset",
       "presetModel": "Preset model",
       "density": "Density",
@@ -118,15 +99,6 @@
       "maxResults": "Max results",
       "timeout": "Timeout",
       "jinaReader": "Jina reader",
-      "imageGeneration": "Pembuatan gambar",
-      "imageProvider": "Penyedia gambar",
-      "imageProviderStatus": "Status penyedia",
-      "imageProviderBase": "Basis penyedia",
-      "imageModel": "Model gambar",
-      "defaultAspectRatio": "Rasio default",
-      "defaultImageSize": "Ukuran default",
-      "maxImagesPerTurn": "Maks. gambar per giliran",
-      "imageSaveDir": "Direktori penyimpanan",
       "botName": "Bot name",
       "botIcon": "Bot icon",
       "timezone": "Timezone",
@@ -157,13 +129,6 @@
       "maxResults": "Results returned by each web_search call.",
       "timeout": "Seconds before a search provider request times out.",
       "jinaReader": "Use Jina Reader for web_fetch when available.",
-      "imageGeneration": "Tampilkan generate_image di chat saat penyedia gambar yang dikonfigurasi tersedia.",
-      "imageProvider": "Pilih penyedia registry yang digunakan oleh generate_image.",
-      "imageProviderStatus": "Pembuatan gambar menggunakan ulang kredensial penyedia dari Providers.",
-      "imageModel": "Nama model yang dikirim ke penyedia gambar yang dipilih.",
-      "defaultAspectRatio": "Digunakan saat prompt tidak memilih rasio aspek.",
-      "defaultImageSize": "Petunjuk ukuran yang dikirim ke penyedia yang mendukungnya.",
-      "maxImagesPerTurn": "Batas atas untuk satu permintaan generate_image.",
       "botName": "Shown in runtime surfaces that use the configured bot identity.",
       "botIcon": "Short emoji or text shown beside the bot name.",
       "timezone": "IANA timezone used by runtime context and schedules.",
@@ -176,8 +141,8 @@
       "notAvailable": "Tidak tersedia",
       "enabled": "Enabled",
       "disabled": "Disabled",
-      "restartPending": "Menunggu restart",
-      "ready": "Siap",
+      "restartRequired": "Restart required",
+      "liveReload": "Live reload ready",
       "comfortable": "Comfortable",
       "compact": "Compact",
       "auto": "Auto",
@@ -185,19 +150,13 @@
       "on": "On",
       "off": "Off",
       "configured": "Configured",
-      "notConfigured": "Not configured",
-      "restartRequired": "Restart required",
-      "liveReload": "Live reload ready"
+      "notConfigured": "Not configured"
     },
     "status": {
       "loading": "Memuat pengaturan...",
       "loadError": "Tidak dapat memuat pengaturan",
       "unsaved": "Ada perubahan yang belum disimpan.",
-      "upToDate": "Sudah terbaru.",
-      "savedRestart": "Tersimpan. Mulai ulang nanobot untuk menerapkan.",
-      "restartAfterSaving": "Simpan perubahan, lalu restart saat siap.",
-      "savedRestartApply": "Tersimpan. Restart saat siap.",
-      "imageProviderRestart": "Perubahan penyedia gambar tersimpan. Restart saat siap."
+      "savedRestart": "Tersimpan. Mulai ulang nanobot untuk menerapkan."
     },
     "actions": {
       "save": "Simpan",
@@ -254,19 +213,11 @@
       "configuredCount": "{{count}} configured",
       "totalProviders": "{{count}} available",
       "webSearch": "Web search",
-      "imageGeneration": "Pembuatan gambar",
       "workspace": "Workspace"
     },
     "providers": {
       "searchPlaceholder": "Search providers",
       "noMatches": "No providers match this search."
-    },
-    "image": {
-      "selectProvider": "Pilih penyedia",
-      "selectAspect": "Pilih rasio",
-      "selectSize": "Pilih ukuran",
-      "configureProvider": "Konfigurasi penyedia",
-      "missingCredential": "Konfigurasikan penyedia ini sebelum mengaktifkan pembuatan gambar."
     }
   },
   "chat": {
@@ -317,6 +268,7 @@
   "thread": {
     "loadingConversation": "Memuat percakapan…",
     "empty": {
+      "description": "Ajukan pertanyaan, lanjutkan pekerjaan lokal, atau mulai thread baru.",
       "greeting": "Apa yang bisa saya bantu?",
       "quickActions": {
         "plan": {
@@ -369,14 +321,10 @@
           "title": "Edit gambar",
           "prompt": "Bantu saya mengedit gambar. Minta saya mengunggah atau menyebutkan gambar terlebih dahulu, lalu buat hasil editnya."
         }
-      },
-      "description": "Ajukan pertanyaan, lanjutkan pekerjaan lokal, atau mulai thread baru."
+      }
     },
     "header": {
-      "toggleSidebar": "Tampilkan atau sembunyikan sidebar",
-      "newChat": "Mulai chat baru",
-      "toggleTheme": "Alihkan tema dari header",
-      "settings": "Buka pengaturan"
+      "toggleSidebar": "Tampilkan atau sembunyikan sidebar"
     },
     "composer": {
       "placeholderThread": "Ketik pesan Anda…",
@@ -390,7 +338,6 @@
       "goalStateFallback": "Tujuan",
       "goalStateExpandAria": "Lihat tujuan lengkap",
       "goalStateSheetTitle": "Tujuan",
-      "goalStateCloseAria": "Tutup tujuan",
       "send": "Kirim pesan",
       "stop": "Hentikan respons",
       "attachImage": "Lampirkan gambar",
@@ -409,11 +356,16 @@
           "16_9": "Lebar 16:9"
         }
       },
-      "tools": {
-        "search": "Cari",
-        "reason": "Bernalar",
-        "deepResearch": "Riset mendalam",
-        "voice": "Input suara"
+      "encoding": "Memproses…",
+      "remove": "Hapus lampiran",
+      "normalizedSizeHint": "{{orig}} → {{current}} (auto)",
+      "imageRejected": {
+        "unsupported_type": "Tipe file tidak didukung",
+        "too_many_images": "Maksimal {{max}} gambar per pesan",
+        "magic_mismatch": "File ini tampaknya bukan gambar asli",
+        "decode_failed": "Tidak dapat mendekode gambar ini",
+        "too_large": "Gambar terlalu besar — coba yang lebih kecil",
+        "io": "Tidak dapat membaca file ini"
       },
       "slash": {
         "ariaLabel": "Perintah slash",
@@ -464,17 +416,7 @@
           }
         }
       },
-      "encoding": "Memproses…",
-      "remove": "Hapus lampiran",
-      "normalizedSizeHint": "{{orig}} → {{current}} (auto)",
-      "imageRejected": {
-        "unsupported_type": "Tipe file tidak didukung",
-        "too_many_images": "Maksimal {{max}} gambar per pesan",
-        "magic_mismatch": "File ini tampaknya bukan gambar asli",
-        "decode_failed": "Tidak dapat mendekode gambar ini",
-        "too_large": "Gambar terlalu besar — coba yang lebih kecil",
-        "io": "Tidak dapat membaca file ini"
-      }
+      "goalStateCloseAria": "Tutup tujuan"
     },
     "scrollToBottom": "Gulir ke bawah",
     "loadEarlier": "Muat pesan sebelumnya"
@@ -496,8 +438,6 @@
     "agentActivityLiveSummary": "Berjalan… · {{reasoning}} langkah · {{tools}} panggilan alat",
     "agentActivityLiveToolsOnly": "Berjalan… · {{tools}} panggilan alat",
     "imageAttachment": "Lampiran gambar",
-    "copyReply": "Salin balasan",
-    "copiedReply": "Balasan disalin",
     "turnLatencyTitle": "Waktu respons (ujung ke ujung)"
   },
   "lightbox": {

@@ -1,6 +1,5 @@
 import type {
   ChatSummary,
-  CliAppsPayload,
   ImageGenerationSettingsUpdate,
   ProviderSettingsUpdate,
   SettingsPayload,
@@ -105,24 +104,6 @@ export async function fetchSettings(
   base: string = "",
 ): Promise<SettingsPayload> {
   return request<SettingsPayload>(`${base}/api/settings`, token);
-}
-
-export async function fetchCliApps(
-  token: string,
-  base: string = "",
-): Promise<CliAppsPayload> {
-  return request<CliAppsPayload>(`${base}/api/settings/cli-apps`, token);
-}
-
-export async function runCliAppAction(
-  token: string,
-  action: "install" | "update" | "uninstall" | "test",
-  name: string,
-  base: string = "",
-): Promise<CliAppsPayload> {
-  const query = new URLSearchParams();
-  query.set("name", name);
-  return request<CliAppsPayload>(`${base}/api/settings/cli-apps/${action}?${query}`, token);
 }
 
 export async function listSlashCommands(
