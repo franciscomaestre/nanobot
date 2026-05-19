@@ -6,12 +6,6 @@
 .env
 .web
 .orion
-nanobot-desktop/
-desktop/
-
-# Claude / AI assistant artifacts
-docs/superpowers/
-docs/plans/
 
 # Claude / AI assistant artifacts
 docs/superpowers/
@@ -104,4 +98,3 @@ tmp/
 temp/
 *.tmp
 exp/
-.playwright-mcp/
