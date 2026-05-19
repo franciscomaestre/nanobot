@@ -187,7 +187,7 @@ async def test_manager_loads_plugin_from_dict_config():
     )
 
     with patch(
-        "nanobot.channels.registry.discover_all",
+        "nanobot.channels.registry.discover_enabled",
         return_value={"fakeplugin": _FakePlugin},
     ):
         mgr = ChannelManager.__new__(ChannelManager)
@@ -217,7 +217,7 @@ async def test_manager_propagates_groq_transcription_api_base_to_channels():
     )
 
     with patch(
-        "nanobot.channels.registry.discover_all",
+        "nanobot.channels.registry.discover_enabled",
         return_value={"fakeplugin": _FakePlugin},
     ):
         mgr = ChannelManager.__new__(ChannelManager)
@@ -253,7 +253,7 @@ async def test_manager_propagates_openai_transcription_api_base_to_channels():
     )
 
     with patch(
-        "nanobot.channels.registry.discover_all",
+        "nanobot.channels.registry.discover_enabled",
         return_value={"fakeplugin": _FakePlugin},
     ):
         mgr = ChannelManager.__new__(ChannelManager)
@@ -505,10 +505,8 @@ async def test_manager_skips_disabled_plugin():
         providers=SimpleNamespace(groq=SimpleNamespace(api_key="")),
     )
 
-    with patch(
-        "nanobot.channels.registry.discover_all",
-        return_value={"fakeplugin": _FakePlugin},
-    ):
+    ep = _make_entry_point("fakeplugin", _FakePlugin)
+    with patch(_EP_TARGET, return_value=[ep]):
         mgr = ChannelManager.__new__(ChannelManager)
         mgr.config = fake_config
         mgr.bus = MessageBus()
