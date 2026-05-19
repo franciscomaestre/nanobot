@@ -224,6 +224,7 @@ nanobot agent
 
 
 - Want different LLM providers, web search, MCP, security settings, or more config options? See [Configuration](./docs/configuration.md)
+- Want to run locally? Use Atomic Chat, Ollama, LM Studio, OpenVINO Model Server, vLLM, or any OpenAI-compatible local server. See [Configuration](./docs/configuration.md)
 - Want to run nanobot in chat apps like Telegram, Discord, WeChat or Feishu? See [Chat Apps](./docs/chat-apps.md)
 - Want Docker or Linux service deployment? See [Deployment](./docs/deployment.md)
 
