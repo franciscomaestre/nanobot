@@ -128,7 +128,6 @@ ANTHROPIC_API_KEY="$(bw get password api/anthropic)" nanobot agent
 > - **Alibaba Cloud BaiLian**: If you're using Alibaba Cloud BaiLian's OpenAI-compatible endpoint, set `"apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1"` in your dashscope provider config.
 > - **Step Fun (Mainland China)**: If your API key is from Step Fun's mainland China platform (stepfun.com), set `"apiBase": "https://api.stepfun.com/v1"` in your stepfun provider config.
 > - **Xiaomi MiMo thinking mode**: MiMo models (e.g. `mimo-v2.5-pro`) default to enabled thinking. Use `agents.defaults.reasoningEffort: "none"` to disable it, or `"low"` / `"medium"` / `"high"` to keep it on. Omitting the field preserves the provider's per-model default.
-> - **Xiaomi MiMo Token Plan**: If you're on MiMo's token plan, set `"apiBase": "https://token-plan-sgp.xiaomimimo.com/v1"` in your xiaomi_mimo provider config.
 
 | Provider | Purpose | Get API Key |
 |----------|---------|-------------|
@@ -479,39 +478,6 @@ Official model names include `LongCat-Flash-Chat`, `LongCat-Flash-Thinking`,
 </details>
 
 <details>
-<summary><b>Xiaomi MiMo</b></summary>
-
-Xiaomi MiMo models are automatically detected by the `xiaomi_mimo` provider when
-the model name contains `mimo`. The default API base is
-`https://api.xiaomimimo.com/v1`.
-
-> **Token Plan**: If you're using MiMo's token plan, override `apiBase` with the
-> dedicated endpoint:
->
-> ```json
-> {
->   "providers": {
->     "xiaomi_mimo": {
->       "apiKey": "${MIMOMIMO_API_KEY}",
->       "apiBase": "https://token-plan-sgp.xiaomimimo.com/v1"
->     }
->   },
->   "agents": {
->     "defaults": {
->       "model": "xiaomi/mimo-v2.5-pro"
->     }
->   }
-> }
-> ```
->
-> No need to set `provider` explicitly — the model name contains `mimo`, which
-> auto-matches to the `xiaomi_mimo` provider spec. Use an API key from the MiMo
-> token plan console and check the MiMo platform for the latest supported model
-> names.
-
-</details>
-
-<details>
 <summary><b>Ant Ling (OpenAI-compatible)</b></summary>
 
 Ant Ling is available through nanobot's built-in OpenAI-compatible provider flow.
@@ -542,7 +508,9 @@ Official OpenAI-compatible model names include `Ling-2.6-1T`,
 <details>
 <summary><b>APIFree (OpenAI-compatible)</b></summary>
 
-APIFree is available through nanobot's built-in OpenAI-compatible provider flow. The default API base points to `https://api.apifree.ai/agent/v1`, so you usually only need to set `apiKey`.
+APIFree is available through nanobot's built-in OpenAI-compatible provider flow.
+The default API base points to `https://api.apifree.ai/agent/v1`, so you usually
+only need to set `apiKey`.
 
 ```json
 {
@@ -1001,7 +969,6 @@ Global settings that apply to all channels. Configure under the `channels` secti
   "channels": {
     "sendProgress": true,
     "sendToolHints": false,
-    "extractDocumentText": true,
     "sendMaxRetries": 3,
     "transcriptionProvider": "groq",
     "transcriptionLanguage": null,
@@ -1015,9 +982,8 @@ Global settings that apply to all channels. Configure under the `channels` secti
 | `sendProgress` | `true` | Stream agent's text progress to the channel |
 | `sendToolHints` | `false` | Stream tool-call hints (e.g. `read_file("…")`) |
 | `showReasoning` | `true` | Allow channels to surface model reasoning/thinking content (DeepSeek-R1 `reasoning_content`, Anthropic `thinking_blocks`, inline `<think>` tags). Reasoning flows as a dedicated stream with `_reasoning_delta` / `_reasoning_end` markers — channels override `send_reasoning_delta` / `send_reasoning_end` to render in-place updates. Even with `true`, channels without those overrides stay no-op silently. Currently surfaced on CLI and WebSocket/WebUI (italic shimmer header, auto-collapses after the stream ends); Telegram / Slack / Discord / Feishu / WeChat / Matrix keep the base no-op until their bubble UI is adapted. Independent of `sendProgress`. |
-| `extractDocumentText` | `true` | Extract supported document/text attachments into the model prompt. Set to `false` to keep document content out of the prompt and include attachment path references instead. |
 | `sendMaxRetries` | `3` | Max delivery attempts per outbound message, including the initial send (0-10 configured, minimum 1 actual attempt) |
-| `transcriptionProvider` | `"groq"` | Voice transcription backend: `"groq"` (free tier, default) or `"openai"`. API key and optional `apiBase` are auto-resolved from the matching provider config. Chat-style bases such as `https://api.groq.com/openai/v1` are normalized to the audio transcription endpoint. |
+| `transcriptionProvider` | `"groq"` | Voice transcription backend: `"groq"` (free tier, default) or `"openai"`. API key is auto-resolved from the matching provider config. |
 | `transcriptionLanguage` | `null` | Optional ISO-639-1 language hint for audio transcription, e.g. `"en"`, `"ko"`, `"ja"`. |
 
 `sendProgress` and `sendToolHints` can also be overridden per channel. The
@@ -1349,7 +1315,6 @@ For API keys, tokens, and other secrets, see [Environment Variables for Secrets]
 | `tools.restrictToWorkspace` | `false` | When `true`, restricts **all** agent tools (shell, file read/write/edit, list) to the workspace directory. Prevents path traversal and out-of-scope access. |
 | `tools.exec.sandbox` | `""` | Sandbox backend for shell commands. Set to `"bwrap"` to wrap exec calls in a [bubblewrap](https://github.com/containers/bubblewrap) sandbox — the process can only see the workspace (read-write) and media directory (read-only); config files and API keys are hidden. Automatically enables `restrictToWorkspace` for file tools. **Linux only** — requires `bwrap` installed (`apt install bubblewrap`; pre-installed in the Docker image). Not available on macOS or Windows (bwrap depends on Linux kernel namespaces). |
 | `tools.exec.enable` | `true` | When `false`, the shell `exec` tool is not registered at all. Use this to completely disable shell command execution. |
-| `tools.exec.timeout` | `60` | Default hard timeout in seconds for shell commands. Config values may exceed the per-call tool cap; set `0` to disable the hard timeout for trusted long-running commands. |
 | `tools.exec.pathAppend` | `""` | Extra directories to append to `PATH` when running shell commands (e.g. `/usr/sbin` for `ufw`). |
 | `channels.*.allowFrom` | omitted | Access control per channel. Omit to use pairing-only mode; set `["*"]` to allow everyone; or list specific user IDs. See [Pairing](#pairing) for details. |
 
