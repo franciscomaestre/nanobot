@@ -116,55 +116,6 @@ def tool_trace_lines_from_events(events: Any) -> list[str]:
     return lines
 
 
-_PHASE_RANK = {"start": 1, "end": 2, "error": 3}
-
-
-def _normalize_tool_events(events: Any) -> list[dict[str, Any]]:
-    if not isinstance(events, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for event in events:
-        if not event or not isinstance(event, dict):
-            continue
-        if event.get("phase") not in {"start", "end", "error"}:
-            continue
-        if not isinstance(event.get("name"), str):
-            fn = event.get("function")
-            if not (isinstance(fn, dict) and isinstance(fn.get("name"), str)):
-                continue
-        out.append(dict(event))
-    return out
-
-
-def _tool_event_key(event: dict[str, Any]) -> str:
-    call_id = event.get("call_id")
-    if isinstance(call_id, str) and call_id:
-        return f"call:{call_id}"
-    return _format_tool_call_trace(event) or json.dumps(event, sort_keys=True, ensure_ascii=False)
-
-
-def _merge_tool_events(previous: Any, incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not isinstance(previous, list) or not previous:
-        return incoming
-    if not incoming:
-        return [dict(event) for event in previous if isinstance(event, dict)]
-    merged = [dict(event) for event in previous if isinstance(event, dict)]
-    index_by_key = {_tool_event_key(event): idx for idx, event in enumerate(merged)}
-    for event in incoming:
-        key = _tool_event_key(event)
-        existing_index = index_by_key.get(key)
-        if existing_index is None:
-            index_by_key[key] = len(merged)
-            merged.append(event)
-            continue
-        existing = merged[existing_index]
-        incoming_rank = _PHASE_RANK.get(str(event.get("phase")), 0)
-        existing_rank = _PHASE_RANK.get(str(existing.get("phase")), 0)
-        if incoming_rank >= existing_rank:
-            merged[existing_index] = {**existing, **event}
-    return merged
-
-
 def _merge_unique_tool_trace_lines(
     previous_traces: list[str],
     lines: list[str],
@@ -214,17 +165,6 @@ def replay_transcript_to_ui_messages(
 
     def _ensure_activity_segment() -> str:
         return active_activity_segment_id or _new_activity_segment()
-
-    def close_activity_for_answer() -> None:
-        nonlocal active_activity_segment_id, active_file_edit_segment_id
-        active_activity_segment_id = None
-        active_file_edit_segment_id = None
-
-    def close_file_edit_phase_before_activity() -> None:
-        nonlocal active_activity_segment_id, active_file_edit_segment_id
-        if active_file_edit_segment_id:
-            active_activity_segment_id = None
-            active_file_edit_segment_id = None
 
     def attach_reasoning_chunk(prev: list[dict[str, Any]], chunk: str, idx: int) -> None:
         for i in range(len(prev) - 1, -1, -1):
@@ -325,7 +265,7 @@ def replay_transcript_to_ui_messages(
                 return
 
     def absorb_complete(extra: dict[str, Any], idx: int) -> None:
-        nonlocal active_activity_segment_id, active_file_edit_segment_id
+        nonlocal active_activity_segment_id
         last = messages[-1] if messages else None
         if last and is_reasoning_only_placeholder(last):
             messages[-1] = {
@@ -344,50 +284,35 @@ def replay_transcript_to_ui_messages(
                 },
             )
         active_activity_segment_id = None
-        active_file_edit_segment_id = None
 
     def _file_edit_key(edit: dict[str, Any]) -> str:
-        call_id = str(edit.get("call_id") or "")
-        tool = str(edit.get("tool") or "")
-        if call_id:
-            return f"{call_id}|{tool}"
-        return f"{tool}|{edit.get('path') or ''}"
-
-    def find_file_edit_trace_index(
-        segment: str | None,
-        edits: list[dict[str, Any]],
-    ) -> int | None:
-        incoming_keys = {_file_edit_key(edit) for edit in edits if isinstance(edit, dict)}
-        for i in range(len(messages) - 1, -1, -1):
-            candidate = messages[i]
-            if candidate.get("role") == "user":
-                break
-            if candidate.get("kind") != "trace" or not candidate.get("fileEdits"):
-                continue
-            if segment and candidate.get("activitySegmentId") == segment:
-                return i
-            existing_edits = candidate.get("fileEdits")
-            if not isinstance(existing_edits, list):
-                continue
-            for existing in existing_edits:
-                if isinstance(existing, dict) and _file_edit_key(existing) in incoming_keys:
-                    return i
-        return None
+        return "|".join(
+            str(edit.get(k) or "")
+            for k in ("call_id", "tool", "path")
+        )
 
     def upsert_file_edits(edits: list[dict[str, Any]], idx: int) -> None:
         nonlocal active_file_edit_segment_id
         if not edits:
             return
-        segment = active_file_edit_segment_id
-        target_index = find_file_edit_trace_index(segment, edits)
-        if target_index is not None:
-            last = messages[target_index]
-            segment = str(last.get("activitySegmentId") or segment or _new_activity_segment(activate=False))
-            active_file_edit_segment_id = segment
+        last = messages[-1] if messages else None
+        if (
+            active_file_edit_segment_id
+            and last
+            and last.get("kind") == "trace"
+            and last.get("fileEdits")
+        ):
+            segment = active_file_edit_segment_id
         else:
-            if not segment:
-                segment = _new_activity_segment(activate=False)
+            segment = _new_activity_segment(activate=False)
             active_file_edit_segment_id = segment
+        if not (
+            last
+            and last.get("kind") == "trace"
+            and not last.get("isStreaming")
+            and last.get("fileEdits")
+            and last.get("activitySegmentId") == segment
+        ):
             messages.append(
                 {
                     "id": _new_id("tr", idx),
@@ -400,11 +325,7 @@ def replay_transcript_to_ui_messages(
                     "createdAt": _ts_base + idx,
                 },
             )
-            target_index = len(messages) - 1
-            last = messages[target_index]
-        if not segment:
-            segment = _new_activity_segment(activate=False)
-            active_file_edit_segment_id = segment
+            last = messages[-1]
         existing = list(last.get("fileEdits") or [])
         index_by_key = {
             _file_edit_key(edit): pos
@@ -417,14 +338,11 @@ def replay_transcript_to_ui_messages(
             key = _file_edit_key(edit)
             if key in index_by_key:
                 pos = index_by_key[key]
-                merged = {**existing[pos], **edit}
-                if edit.get("path") and not edit.get("pending"):
-                    merged.pop("pending", None)
-                existing[pos] = merged
+                existing[pos] = {**existing[pos], **edit}
             else:
                 index_by_key[key] = len(existing)
                 existing.append(dict(edit))
-        messages[target_index] = {
+        messages[-1] = {
             **last,
             "fileEdits": existing,
             "activitySegmentId": last.get("activitySegmentId") or segment,
@@ -454,9 +372,6 @@ def replay_transcript_to_ui_messages(
                 row["media"] = media_att
                 if all(m.get("kind") == "image" for m in media_att):
                     row["images"] = [{"url": m.get("url"), "name": m.get("name")} for m in media_att]
-            cli_apps = rec.get("cli_apps")
-            if isinstance(cli_apps, list) and cli_apps:
-                row["cliApps"] = [dict(app) for app in cli_apps if isinstance(app, dict)]
             messages.append(row)
             continue
 
@@ -472,7 +387,6 @@ def replay_transcript_to_ui_messages(
             chunk = rec.get("text")
             if not isinstance(chunk, str):
                 continue
-            close_activity_for_answer()
             adopted = find_active_placeholder(messages) if buffer_message_id is None else None
             if buffer_message_id is None:
                 if adopted:
@@ -511,7 +425,6 @@ def replay_transcript_to_ui_messages(
             chunk = rec.get("text")
             if not isinstance(chunk, str) or not chunk:
                 continue
-            close_file_edit_phase_before_activity()
             attach_reasoning_chunk(messages, chunk, idx)
             continue
 
@@ -533,12 +446,10 @@ def replay_transcript_to_ui_messages(
                 line = rec.get("text")
                 if not isinstance(line, str) or not line:
                     continue
-                close_file_edit_phase_before_activity()
                 attach_reasoning_chunk(messages, line, idx)
                 close_reasoning(messages)
                 continue
             if kind in ("tool_hint", "progress"):
-                structured_events = _normalize_tool_events(rec.get("tool_events"))
                 structured = tool_trace_lines_from_events(rec.get("tool_events"))
                 text = rec.get("text")
                 trace_lines = structured if structured else ([text] if isinstance(text, str) and text else [])
@@ -555,7 +466,7 @@ def replay_transcript_to_ui_messages(
                     prev_traces = list(last.get("traces") or [last.get("content")])
                     if structured:
                         merged_traces, added = _merge_unique_tool_trace_lines(prev_traces, structured)
-                        if not added and not structured_events:
+                        if not added:
                             continue
                     else:
                         merged_traces = prev_traces + trace_lines
@@ -563,9 +474,6 @@ def replay_transcript_to_ui_messages(
                         **last,
                         "traces": merged_traces,
                         "content": merged_traces[-1],
-                        "toolEvents": _merge_tool_events(last.get("toolEvents"), structured_events)
-                        if structured_events
-                        else last.get("toolEvents"),
                         "activitySegmentId": last.get("activitySegmentId") or segment,
                     }
                     messages[-1] = merged
@@ -577,7 +485,6 @@ def replay_transcript_to_ui_messages(
                             "kind": "trace",
                             "content": trace_lines[-1],
                             "traces": trace_lines,
-                            **({"toolEvents": structured_events} if structured_events else {}),
                             "activitySegmentId": segment,
                             "createdAt": _ts_base + idx,
                         },
