@@ -129,11 +129,6 @@ _IMAGE_GEN_PROVIDERS: dict[str, type[ImageGenerationProvider]] = {}
 
 
 def register_image_gen_provider(cls: type[ImageGenerationProvider]) -> None:
-    """Register an image provider at import time only.
-
-    The registry is populated by module side effects so provider discovery
-    stays lazy and consistent across the process.
-    """
     name = cls.provider_name
     if not name:
         raise ValueError(f"{cls.__name__} must set provider_name")
@@ -209,7 +204,7 @@ class ImageGenerationProvider(ABC):
         image_size: str | None = None,
     ) -> GeneratedImageResponse: ...
 
-    def _ensure_images(self, images: list[str], data: dict[str, Any]) -> None:
+    def _require_images(self, images: list[str], data: dict[str, Any]) -> None:
         if images:
             return
         provider_error = data.get("error") if isinstance(data, dict) else None
@@ -224,10 +219,7 @@ class ImageGenerationProvider(ABC):
         *,
         headers: dict[str, str],
         body: dict[str, Any],
-        client: httpx.AsyncClient | None = None,
     ) -> httpx.Response:
-        if client is not None:
-            return await client.post(url, headers=headers, json=body)
         if self._client is not None:
             return await self._client.post(url, headers=headers, json=body)
         async with httpx.AsyncClient(timeout=self.timeout) as c:
@@ -316,7 +308,7 @@ class OpenRouterImageGenerationClient(ImageGenerationProvider):
                 if isinstance(url_value, str) and url_value.startswith("data:image/"):
                     images.append(url_value)
 
-        self._ensure_images(images, data)
+        self._require_images(images, data)
 
         return GeneratedImageResponse(
             images=images,
@@ -398,11 +390,10 @@ class AIHubMixImageGenerationClient(ImageGenerationProvider):
         model_path = _aihubmix_model_path(model)
         url = f"{self.api_base}/models/{model_path}/predictions"
         try:
-            response = await self._http_post(
+            response = await client.post(
                 url,
                 headers={**headers, "Content-Type": "application/json"},
-                body=body,
-                client=client,
+                json=body,
             )
         except httpx.TimeoutException as exc:
             raise ImageGenerationError("AIHubMix image generation timed out") from exc
@@ -418,7 +409,7 @@ class AIHubMixImageGenerationClient(ImageGenerationProvider):
         payload = response.json()
         images = await _aihubmix_images_from_payload(client, payload)
 
-        self._ensure_images(images, payload)
+        self._require_images(images, payload)
 
         return GeneratedImageResponse(images=images, content="", raw=payload)
 
@@ -451,9 +442,9 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
         return "https://generativelanguage.googleapis.com/v1beta"
 
     def _resolve_base_url(self, api_base: str | None) -> str:
-        # Gemini chat completions use the registry's OpenAI-compatible shim.
-        # Image generation must hit the native Generative Language API, so we
-        # intentionally bypass the shared registry lookup here.
+        # The Gemini provider's registry default_api_base is the OpenAI-compat
+        # shim (.../v1beta/openai/), which has no image endpoints.
+        # Skip the registry lookup and use the native API base directly.
         if api_base:
             return api_base.rstrip("/")
         return self._default_base_url()
@@ -527,7 +518,7 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
             if isinstance(b64, str) and b64:
                 images.append(f"data:{mime};base64,{b64}")
 
-        self._ensure_images(images, data)
+        self._require_images(images, data)
 
         return GeneratedImageResponse(images=images, content="", raw=data)
 
@@ -585,7 +576,7 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
                     if b64:
                         images.append(f"data:{mime};base64,{b64}")
 
-        self._ensure_images(images, data)
+        self._require_images(images, data)
 
         return GeneratedImageResponse(
             images=images,
@@ -715,16 +706,22 @@ class MiniMaxImageGenerationClient(ImageGenerationProvider):
 
         body.update(self.extra_body)
 
-        return await self._generate_with_client(body, headers)
+        client = self._client or httpx.AsyncClient(timeout=self.timeout)
+        try:
+            return await self._generate_with_client(client, body, headers)
+        finally:
+            if self._client is None:
+                await client.aclose()
 
     async def _generate_with_client(
         self,
+        client: httpx.AsyncClient,
         body: dict[str, Any],
         headers: dict[str, str],
     ) -> GeneratedImageResponse:
         url = f"{self.api_base}/image_generation"
         try:
-            response = await self._http_post(url, headers=headers, body=body)
+            response = await client.post(url, headers=headers, json=body)
         except httpx.TimeoutException as exc:
             raise ImageGenerationError("MiniMax image generation timed out") from exc
         except httpx.RequestError as exc:
@@ -739,7 +736,7 @@ class MiniMaxImageGenerationClient(ImageGenerationProvider):
         payload = response.json()
         images = _minimax_images_from_payload(payload)
 
-        self._ensure_images(images, payload)
+        self._require_images(images, payload)
 
         return GeneratedImageResponse(images=images, content="", raw=payload)
 
@@ -845,7 +842,7 @@ class StepFunImageGenerationClient(ImageGenerationProvider):
         payload = response.json()
         images = _stepfun_images_from_payload(payload)
 
-        self._ensure_images(images, payload)
+        self._require_images(images, payload)
 
         return GeneratedImageResponse(images=images, content="", raw=payload)
 
