@@ -9,7 +9,7 @@ import {
   listSessions,
 } from "@/lib/api";
 import { deriveTitle } from "@/lib/format";
-import type { ChatSummary, UIMessage, WorkspaceScopePayload } from "@/lib/types";
+import type { ChatSummary, UIMessage } from "@/lib/types";
 
 const EMPTY_MESSAGES: UIMessage[] = [];
 
@@ -19,7 +19,7 @@ export function useSessions(): {
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
-  createChat: (workspaceScope?: WorkspaceScopePayload | null) => Promise<string>;
+  createChat: () => Promise<string>;
   deleteChat: (key: string) => Promise<void>;
 } {
   const { client, token } = useClient();
@@ -27,25 +27,13 @@ export function useSessions(): {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const tokenRef = useRef(token);
-  const optimisticKeysRef = useRef<Set<string>>(new Set());
   tokenRef.current = token;
 
   const refresh = useCallback(async () => {
     try {
       setLoading(true);
       const rows = await listSessions(tokenRef.current);
-      const serverKeys = new Set(rows.map((row) => row.key));
-      setSessions((prev) => [
-        ...rows,
-        ...prev.filter(
-          (session) =>
-            optimisticKeysRef.current.has(session.key) &&
-            !serverKeys.has(session.key),
-        ),
-      ]);
-      for (const key of Array.from(optimisticKeysRef.current)) {
-        if (serverKeys.has(key)) optimisticKeysRef.current.delete(key);
-      }
+      setSessions(rows);
       setError(null);
     } catch (e) {
       const msg =
@@ -66,10 +54,9 @@ export function useSessions(): {
     });
   }, [client, refresh]);
 
-  const createChat = useCallback(async (workspaceScope?: WorkspaceScopePayload | null): Promise<string> => {
-    const chatId = await client.newChat(5_000, workspaceScope);
+  const createChat = useCallback(async (): Promise<string> => {
+    const chatId = await client.newChat();
     const key = `websocket:${chatId}`;
-    optimisticKeysRef.current.add(key);
     // Optimistic insert; a subsequent refresh will replace it with the
     // authoritative row once the server persists the session.
     setSessions((prev) => [
@@ -81,7 +68,6 @@ export function useSessions(): {
         updatedAt: new Date().toISOString(),
         title: "",
         preview: "",
-        workspaceScope: workspaceScope ?? null,
       },
       ...prev.filter((s) => s.key !== key),
     ]);
@@ -91,7 +77,6 @@ export function useSessions(): {
   const deleteChat = useCallback(
     async (key: string) => {
       await apiDeleteSession(tokenRef.current, key);
-      optimisticKeysRef.current.delete(key);
       setSessions((prev) => prev.filter((s) => s.key !== key));
     },
     [],
