@@ -129,6 +129,11 @@ _IMAGE_GEN_PROVIDERS: dict[str, type[ImageGenerationProvider]] = {}
 
 
 def register_image_gen_provider(cls: type[ImageGenerationProvider]) -> None:
+    """Register an image provider at import time only.
+
+    The registry is populated by module side effects so provider discovery
+    stays lazy and consistent across the process.
+    """
     name = cls.provider_name
     if not name:
         raise ValueError(f"{cls.__name__} must set provider_name")
@@ -204,7 +209,7 @@ class ImageGenerationProvider(ABC):
         image_size: str | None = None,
     ) -> GeneratedImageResponse: ...
 
-    def _require_images(self, images: list[str], data: dict[str, Any]) -> None:
+    def _ensure_images(self, images: list[str], data: dict[str, Any]) -> None:
         if images:
             return
         provider_error = data.get("error") if isinstance(data, dict) else None
@@ -308,7 +313,7 @@ class OpenRouterImageGenerationClient(ImageGenerationProvider):
                 if isinstance(url_value, str) and url_value.startswith("data:image/"):
                     images.append(url_value)
 
-        self._require_images(images, data)
+        self._ensure_images(images, data)
 
         return GeneratedImageResponse(
             images=images,
@@ -409,7 +414,7 @@ class AIHubMixImageGenerationClient(ImageGenerationProvider):
         payload = response.json()
         images = await _aihubmix_images_from_payload(client, payload)
 
-        self._require_images(images, payload)
+        self._ensure_images(images, payload)
 
         return GeneratedImageResponse(images=images, content="", raw=payload)
 
@@ -442,9 +447,9 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
         return "https://generativelanguage.googleapis.com/v1beta"
 
     def _resolve_base_url(self, api_base: str | None) -> str:
-        # The Gemini provider's registry default_api_base is the OpenAI-compat
-        # shim (.../v1beta/openai/), which has no image endpoints.
-        # Skip the registry lookup and use the native API base directly.
+        # Gemini chat completions use the registry's OpenAI-compatible shim.
+        # Image generation must hit the native Generative Language API, so we
+        # intentionally bypass the shared registry lookup here.
         if api_base:
             return api_base.rstrip("/")
         return self._default_base_url()
@@ -518,7 +523,7 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
             if isinstance(b64, str) and b64:
                 images.append(f"data:{mime};base64,{b64}")
 
-        self._require_images(images, data)
+        self._ensure_images(images, data)
 
         return GeneratedImageResponse(images=images, content="", raw=data)
 
@@ -576,7 +581,7 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
                     if b64:
                         images.append(f"data:{mime};base64,{b64}")
 
-        self._require_images(images, data)
+        self._ensure_images(images, data)
 
         return GeneratedImageResponse(
             images=images,
@@ -736,7 +741,7 @@ class MiniMaxImageGenerationClient(ImageGenerationProvider):
         payload = response.json()
         images = _minimax_images_from_payload(payload)
 
-        self._require_images(images, payload)
+        self._ensure_images(images, payload)
 
         return GeneratedImageResponse(images=images, content="", raw=payload)
 
@@ -842,7 +847,7 @@ class StepFunImageGenerationClient(ImageGenerationProvider):
         payload = response.json()
         images = _stepfun_images_from_payload(payload)
 
-        self._require_images(images, payload)
+        self._ensure_images(images, payload)
 
         return GeneratedImageResponse(images=images, content="", raw=payload)
 
