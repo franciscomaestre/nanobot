@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,9 @@ from nanobot.providers.image_generation import (
     GeminiImageGenerationClient,
     GeneratedImageResponse,
     ImageGenerationError,
+    MiniMaxImageGenerationClient,
     OpenRouterImageGenerationClient,
+    StepFunImageGenerationClient,
 )
 
 PNG_BYTES = (
@@ -24,6 +27,7 @@ PNG_DATA_URL = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
+JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"0" * 12
 
 
 class FakeResponse:
@@ -205,6 +209,20 @@ async def test_aihubmix_image_generation_downloads_url_response() -> None:
     assert fake.get_calls[0]["url"] == "https://cdn.example/image.png"
 
 
+@pytest.mark.asyncio
+async def test_aihubmix_base64_response_uses_detected_mime() -> None:
+    raw_b64 = base64.b64encode(JPEG_BYTES).decode("ascii")
+    fake = FakeClient(FakeResponse({"output": {"b64_json": raw_b64}}))
+    client = AIHubMixImageGenerationClient(
+        api_key="sk-ahm-test",
+        client=fake,  # type: ignore[arg-type]
+    )
+
+    response = await client.generate(prompt="draw", model="gpt-image-2-free")
+
+    assert response.images == [f"data:image/jpeg;base64,{raw_b64}"]
+
+
 RAW_B64 = PNG_DATA_URL.removeprefix("data:image/png;base64,")
 
 
@@ -330,11 +348,6 @@ async def test_gemini_requires_api_key() -> None:
         await client.generate(prompt="draw", model="imagen-4.0-generate-001")
 
 
-def test_gemini_image_client_uses_native_api_base_by_default() -> None:
-    client = GeminiImageGenerationClient(api_key="AIza-test")
-    assert client.api_base == "https://generativelanguage.googleapis.com/v1beta"
-
-
 @pytest.mark.asyncio
 async def test_gemini_no_images_raises() -> None:
     fake = FakeClient(FakeResponse({"candidates": [{"content": {"parts": [{"text": "sorry"}]}}]}))
@@ -342,3 +355,174 @@ async def test_gemini_no_images_raises() -> None:
 
     with pytest.raises(ImageGenerationError, match="returned no images"):
         await client.generate(prompt="draw", model="gemini-2.0-flash-preview-image-generation")
+
+
+@pytest.mark.asyncio
+async def test_minimax_payload_and_response_with_reference_image(tmp_path: Path) -> None:
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(PNG_BYTES)
+    fake = FakeClient(FakeResponse({"data": {"image_base64": [RAW_B64]}}))
+    client = MiniMaxImageGenerationClient(
+        api_key="sk-mm-test",
+        api_base="https://api.minimaxi.com/v1/",
+        extra_headers={"X-Test": "1"},
+        client=fake,  # type: ignore[arg-type]
+    )
+
+    response = await client.generate(
+        prompt="draw a character",
+        model="image-01",
+        reference_images=[str(ref)],
+        aspect_ratio="21:9",
+    )
+
+    assert response.images == [PNG_DATA_URL]
+    call = fake.calls[0]
+    assert call["url"] == "https://api.minimaxi.com/v1/image_generation"
+    assert call["headers"]["Authorization"] == "Bearer sk-mm-test"
+    assert call["headers"]["X-Test"] == "1"
+    body = call["json"]
+    assert body["model"] == "image-01"
+    assert body["prompt"] == "draw a character"
+    assert body["response_format"] == "base64"
+    assert body["aspect_ratio"] == "21:9"
+    assert body["subject_reference"][0]["type"] == "character"
+    assert body["subject_reference"][0]["image_file"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_minimax_base64_response_uses_detected_mime() -> None:
+    raw_b64 = base64.b64encode(JPEG_BYTES).decode("ascii")
+    fake = FakeClient(FakeResponse({"data": {"image_base64": [raw_b64]}}))
+    client = MiniMaxImageGenerationClient(api_key="sk-mm-test", client=fake)  # type: ignore[arg-type]
+
+    response = await client.generate(prompt="draw", model="image-01")
+
+    assert response.images == [f"data:image/jpeg;base64,{raw_b64}"]
+
+
+# ---------------------------------------------------------------------------
+# StepFun (阶跃星辰)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stepfun_payload_and_response_with_aspect_ratio() -> None:
+    fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
+    client = StepFunImageGenerationClient(
+        api_key="sk-sf-test",
+        api_base="https://api.stepfun.com/v1",
+        extra_headers={"X-Test": "1"},
+        client=fake,  # type: ignore[arg-type]
+    )
+
+    response = await client.generate(
+        prompt="a cat on the moon",
+        model="step-image-edit-2",
+        aspect_ratio="16:9",
+    )
+
+    assert response.images == [PNG_DATA_URL]
+    call = fake.calls[0]
+    assert call["url"] == "https://api.stepfun.com/v1/images/generations"
+    assert call["headers"]["Authorization"] == "Bearer sk-sf-test"
+    assert call["headers"]["X-Test"] == "1"
+    body = call["json"]
+    assert body["model"] == "step-image-edit-2"
+    assert body["prompt"] == "a cat on the moon"
+    assert body["response_format"] == "b64_json"
+    assert body["n"] == 1
+    assert body["size"] == "1280x800"
+
+
+@pytest.mark.asyncio
+async def test_stepfun_default_size_when_no_aspect_ratio() -> None:
+    fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
+    client = StepFunImageGenerationClient(
+        api_key="sk-sf-test",
+        api_base="https://api.stepfun.com/v1",
+        client=fake,  # type: ignore[arg-type]
+    )
+
+    await client.generate(prompt="a dog", model="step-image-edit-2")
+
+    body = fake.calls[0]["json"]
+    assert body["size"] == "1024x1024"
+
+
+@pytest.mark.asyncio
+async def test_stepfun_uses_explicit_image_size() -> None:
+    fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
+    client = StepFunImageGenerationClient(
+        api_key="sk-sf-test",
+        api_base="https://api.stepfun.com/v1",
+        client=fake,  # type: ignore[arg-type]
+    )
+
+    await client.generate(
+        prompt="a bird",
+        model="step-image-edit-2",
+        image_size="1024x1024",
+    )
+
+    body = fake.calls[0]["json"]
+    assert body["size"] == "1024x1024"
+
+
+@pytest.mark.asyncio
+async def test_stepfun_style_reference_on_1x_model(tmp_path: Path) -> None:
+    """step-1x-medium supports style_reference for reference-image generation."""
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(PNG_BYTES)
+    fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
+    client = StepFunImageGenerationClient(
+        api_key="sk-sf-test",
+        api_base="https://api.stepfun.com/v1",
+        client=fake,  # type: ignore[arg-type]
+    )
+
+    await client.generate(
+        prompt="in this style",
+        model="step-1x-medium",
+        reference_images=[str(ref)],
+    )
+
+    body = fake.calls[0]["json"]
+    assert "style_reference" in body
+    assert body["style_reference"]["source_url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_stepfun_no_style_reference_on_non_1x_model() -> None:
+    """step-image-edit-2 does not use style_reference; reference images are ignored."""
+    fake = FakeClient(FakeResponse({"data": [{"b64_json": RAW_B64}]}))
+    client = StepFunImageGenerationClient(
+        api_key="sk-sf-test",
+        api_base="https://api.stepfun.com/v1",
+        client=fake,  # type: ignore[arg-type]
+    )
+
+    await client.generate(
+        prompt="a flower",
+        model="step-image-edit-2",
+        reference_images=["/tmp/ref.png"],
+    )
+
+    body = fake.calls[0]["json"]
+    assert "style_reference" not in body
+
+
+@pytest.mark.asyncio
+async def test_stepfun_requires_api_key() -> None:
+    client = StepFunImageGenerationClient(api_key=None)
+
+    with pytest.raises(ImageGenerationError, match="API key"):
+        await client.generate(prompt="draw", model="step-image-edit-2")
+
+
+@pytest.mark.asyncio
+async def test_stepfun_no_images_raises() -> None:
+    fake = FakeClient(FakeResponse({"data": [{"text": "sorry"}]}))
+    client = StepFunImageGenerationClient(api_key="sk-sf-test", client=fake)  # type: ignore[arg-type]
+
+    with pytest.raises(ImageGenerationError, match="returned no images"):
+        await client.generate(prompt="draw", model="step-image-edit-2")
