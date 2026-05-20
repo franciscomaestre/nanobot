@@ -10,7 +10,6 @@ from typing import Any
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.file_state import FileStates, _hash_file, current_file_states
 from nanobot.agent.tools.path_utils import resolve_workspace_path
-from nanobot.security.workspace_access import current_tool_workspace
 from nanobot.agent.tools.schema import (
     BooleanSchema,
     IntegerSchema,
@@ -29,18 +28,10 @@ class _FsTool(Tool):
         allowed_dir: Path | None = None,
         extra_allowed_dirs: list[Path] | None = None,
         file_states: FileStates | None = None,
-        restrict_to_workspace: bool | None = None,
-        sandbox_restricts_workspace: bool = False,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
         self._extra_allowed_dirs = extra_allowed_dirs
-        self._restrict_to_workspace = (
-            bool(restrict_to_workspace)
-            if restrict_to_workspace is not None
-            else allowed_dir is not None
-        )
-        self._sandbox_restricts_workspace = sandbox_restricts_workspace
         # Explicit state is used by isolated runners like Dream/subagents.
         # Main AgentLoop tools leave this unset and resolve state from the
         # current async task, which keeps shared tool instances session-safe.
@@ -55,16 +46,13 @@ class _FsTool(Tool):
             ctx.config.restrict_to_workspace
             or ctx.config.exec.sandbox
         )
-        sandbox_restricts = bool(ctx.config.exec.sandbox)
         allowed_dir = Path(ctx.workspace) if restrict else None
-        extra_read = [BUILTIN_SKILLS_DIR]
+        extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
         return cls(
             workspace=Path(ctx.workspace),
             allowed_dir=allowed_dir,
             extra_allowed_dirs=extra_read,
             file_states=ctx.file_state_store,
-            restrict_to_workspace=ctx.config.restrict_to_workspace,
-            sandbox_restricts_workspace=sandbox_restricts,
         )
 
     @property
@@ -74,20 +62,12 @@ class _FsTool(Tool):
         return current_file_states(self._fallback_file_states)
 
     def _resolve(self, path: str) -> Path:
-        access = current_tool_workspace(
-            self._workspace,
-            restrict_to_workspace=self._restrict_to_workspace,
-            sandbox_restricts_workspace=self._sandbox_restricts_workspace,
-        )
         return resolve_workspace_path(
             path,
-            access.project_path,
-            access.allowed_root,
+            self._workspace,
+            self._allowed_dir,
             self._extra_allowed_dirs,
         )
-
-    def _display_workspace(self) -> Path | None:
-        return current_tool_workspace(self._workspace).project_path
 
 
 # ---------------------------------------------------------------------------
@@ -178,9 +158,6 @@ class ReadFileTool(_FsTool):
             "Text output format: LINE_NUM|CONTENT. "
             "Images return visual content for analysis. "
             "Supports PDF, DOCX, XLSX, PPTX documents. "
-            "Use find_files/list_dir first when the path is uncertain. "
-            "Read the relevant range before editing so replacements or patches "
-            "are based on current content. "
             "Use offset and limit for large text files. "
             "Use force=true to re-read content even if unchanged. "
             "Reads exceeding ~128K chars are truncated."
@@ -407,10 +384,9 @@ class WriteFileTool(_FsTool):
     @property
     def description(self) -> str:
         return (
-            "Create a new file or intentionally replace an entire file with "
-            "the provided content. Overwrites existing files and creates parent "
-            "directories as needed. For code changes or partial edits, prefer "
-            "apply_patch; use edit_file only for small exact replacements."
+            "Write content to a file. Overwrites if the file already exists; "
+            "creates parent directories as needed. "
+            "For partial edits, prefer edit_file instead."
         )
 
     async def execute(self, path: str | None = None, content: str | None = None, **kwargs: Any) -> str:
@@ -735,13 +711,10 @@ class EditFileTool(_FsTool):
     @property
     def description(self) -> str:
         return (
-            "Perform a small, exact replacement in one file by replacing "
-            "old_text with new_text. Use this for narrow text substitutions "
-            "with old_text copied from read_file. For multi-file, structural, "
-            "or generated code edits, prefer apply_patch. If old_text matches "
-            "multiple times, provide more context or set occurrence, line_hint, "
-            "replace_all, and expected_replacements. Shows closest-match "
-            "diagnostics on failure."
+            "Edit a file by replacing old_text with new_text. "
+            "Tolerates minor whitespace/indentation differences and curly/straight quote mismatches. "
+            "If old_text matches multiple times, you must provide more context "
+            "or set occurrence/line_hint/replace_all. Shows a diff of the closest match on failure."
         )
 
     @staticmethod
