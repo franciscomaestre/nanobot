@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import binascii
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,15 +46,6 @@ class GeneratedImageResponse:
     raw: dict[str, Any]
 
 
-def _provider_base_url(provider: str, api_base: str | None, fallback: str) -> str:
-    if api_base:
-        return api_base.rstrip("/")
-    spec = find_by_name(provider)
-    if spec and spec.default_api_base:
-        return spec.default_api_base.rstrip("/")
-    return fallback
-
-
 def _read_image_b64(path: str | Path) -> tuple[str, str]:
     """Return ``(mime, base64)`` for the image at ``path``."""
     p = Path(path).expanduser()
@@ -75,8 +68,16 @@ def image_path_to_inline_data(path: str | Path) -> dict[str, str]:
     return {"mimeType": mime, "data": encoded}
 
 
-def _b64_png_data_url(value: str) -> str:
-    return f"data:image/png;base64,{value}"
+def _b64_image_data_url(value: str) -> str:
+    encoded = "".join(value.split())
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except binascii.Error as exc:
+        raise ImageGenerationError("generated image payload was not valid base64") from exc
+    mime = detect_image_mime(raw)
+    if mime is None:
+        raise ImageGenerationError("generated image payload was not a supported image")
+    return f"data:{mime};base64,{encoded}"
 
 
 def _aihubmix_size(aspect_ratio: str | None, image_size: str | None) -> str:
@@ -120,8 +121,54 @@ async def _download_image_data_url(
     return f"data:{mime};base64,{encoded}"
 
 
-class OpenRouterImageGenerationClient:
-    """Small async client for OpenRouter Chat Completions image generation."""
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+
+_IMAGE_GEN_PROVIDERS: dict[str, type[ImageGenerationProvider]] = {}
+
+
+def register_image_gen_provider(cls: type[ImageGenerationProvider]) -> None:
+    """Register an image provider at import time only.
+
+    The registry is populated by module side effects so provider discovery
+    stays lazy and consistent across the process.
+    """
+    name = cls.provider_name
+    if not name:
+        raise ValueError(f"{cls.__name__} must set provider_name")
+    _IMAGE_GEN_PROVIDERS[name] = cls
+
+
+def get_image_gen_provider(name: str) -> type[ImageGenerationProvider] | None:
+    return _IMAGE_GEN_PROVIDERS.get(name)
+
+
+def image_gen_provider_names() -> tuple[str, ...]:
+    """Return registered image generation provider names in registry order."""
+    return tuple(_IMAGE_GEN_PROVIDERS)
+
+
+def image_gen_provider_configs(config: Any) -> dict[str, Any]:
+    providers_cfg = config.providers
+    return {
+        name: pc
+        for name in _IMAGE_GEN_PROVIDERS
+        if (pc := getattr(providers_cfg, name, None)) is not None
+    }
+
+
+# ---------------------------------------------------------------------------
+# Base class
+# ---------------------------------------------------------------------------
+
+
+class ImageGenerationProvider(ABC):
+    """Base class for image generation provider clients."""
+
+    provider_name: str = ""
+    missing_key_message: str = ""
+    default_timeout: float = _DEFAULT_TIMEOUT_S
 
     def __init__(
         self,
@@ -130,19 +177,73 @@ class OpenRouterImageGenerationClient:
         api_base: str | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_body: dict[str, Any] | None = None,
-        timeout: float = _DEFAULT_TIMEOUT_S,
+        timeout: float | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.api_key = api_key
-        self.api_base = _provider_base_url(
-            "openrouter",
-            api_base,
-            "https://openrouter.ai/api/v1",
-        )
+        self.api_base = self._resolve_base_url(api_base)
         self.extra_headers = extra_headers or {}
         self.extra_body = extra_body or {}
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else self.default_timeout
         self._client = client
+
+    def _resolve_base_url(self, api_base: str | None) -> str:
+        if api_base:
+            return api_base.rstrip("/")
+        spec = find_by_name(self.provider_name)
+        if spec and spec.default_api_base:
+            return spec.default_api_base.rstrip("/")
+        return self._default_base_url()
+
+    def _default_base_url(self) -> str:
+        return ""
+
+    @abstractmethod
+    async def generate(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        reference_images: list[str] | None = None,
+        aspect_ratio: str | None = None,
+        image_size: str | None = None,
+    ) -> GeneratedImageResponse: ...
+
+    def _ensure_images(self, images: list[str], data: dict[str, Any]) -> None:
+        if images:
+            return
+        provider_error = data.get("error") if isinstance(data, dict) else None
+        label = self.provider_name
+        if provider_error:
+            raise ImageGenerationError(f"{label} returned no images: {provider_error}")
+        raise ImageGenerationError(f"{label} returned no images for this request")
+
+    async def _http_post(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        body: dict[str, Any],
+        client: httpx.AsyncClient | None = None,
+    ) -> httpx.Response:
+        if client is not None:
+            return await client.post(url, headers=headers, json=body)
+        if self._client is not None:
+            return await self._client.post(url, headers=headers, json=body)
+        async with httpx.AsyncClient(timeout=self.timeout) as c:
+            return await c.post(url, headers=headers, json=body)
+
+
+class OpenRouterImageGenerationClient(ImageGenerationProvider):
+    """Small async client for OpenRouter Chat Completions image generation."""
+
+    provider_name = "openrouter"
+    missing_key_message = (
+        "OpenRouter API key is not configured. Set providers.openrouter.apiKey."
+    )
+
+    def _default_base_url(self) -> str:
+        return "https://openrouter.ai/api/v1"
 
     async def generate(
         self,
@@ -154,9 +255,7 @@ class OpenRouterImageGenerationClient:
         image_size: str | None = None,
     ) -> GeneratedImageResponse:
         if not self.api_key:
-            raise ImageGenerationError(
-                "OpenRouter API key is not configured. Set providers.openrouter.apiKey."
-            )
+            raise ImageGenerationError(self.missing_key_message)
 
         content: str | list[dict[str, Any]]
         references = list(reference_images or [])
@@ -192,12 +291,7 @@ class OpenRouterImageGenerationClient:
             **self.extra_headers,
         }
         url = f"{self.api_base}/chat/completions"
-
-        if self._client is not None:
-            response = await self._client.post(url, headers=headers, json=body)
-        else:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, headers=headers, json=body)
+        response = await self._http_post(url, headers=headers, body=body)
 
         try:
             response.raise_for_status()
@@ -222,11 +316,7 @@ class OpenRouterImageGenerationClient:
                 if isinstance(url_value, str) and url_value.startswith("data:image/"):
                     images.append(url_value)
 
-        if not images:
-            provider_error = data.get("error") if isinstance(data, dict) else None
-            if provider_error:
-                raise ImageGenerationError(f"OpenRouter returned no images: {provider_error}")
-            raise ImageGenerationError("OpenRouter returned no images for this request")
+        self._ensure_images(images, data)
 
         return GeneratedImageResponse(
             images=images,
@@ -235,29 +325,17 @@ class OpenRouterImageGenerationClient:
         )
 
 
-class AIHubMixImageGenerationClient:
+class AIHubMixImageGenerationClient(ImageGenerationProvider):
     """Small async client for AIHubMix unified image generation."""
 
-    def __init__(
-        self,
-        *,
-        api_key: str | None,
-        api_base: str | None = None,
-        extra_headers: dict[str, str] | None = None,
-        extra_body: dict[str, Any] | None = None,
-        timeout: float = _AIHUBMIX_TIMEOUT_S,
-        client: httpx.AsyncClient | None = None,
-    ) -> None:
-        self.api_key = api_key
-        self.api_base = _provider_base_url(
-            "aihubmix",
-            api_base,
-            "https://aihubmix.com/v1",
-        )
-        self.extra_headers = extra_headers or {}
-        self.extra_body = extra_body or {}
-        self.timeout = timeout
-        self._client = client
+    provider_name = "aihubmix"
+    missing_key_message = (
+        "AIHubMix API key is not configured. Set providers.aihubmix.apiKey."
+    )
+    default_timeout = _AIHUBMIX_TIMEOUT_S
+
+    def _default_base_url(self) -> str:
+        return "https://aihubmix.com/v1"
 
     async def generate(
         self,
@@ -269,9 +347,7 @@ class AIHubMixImageGenerationClient:
         image_size: str | None = None,
     ) -> GeneratedImageResponse:
         if not self.api_key:
-            raise ImageGenerationError(
-                "AIHubMix API key is not configured. Set providers.aihubmix.apiKey."
-            )
+            raise ImageGenerationError(self.missing_key_message)
 
         refs = list(reference_images or [])
         headers = {
@@ -280,16 +356,8 @@ class AIHubMixImageGenerationClient:
         }
         size = _aihubmix_size(aspect_ratio, image_size)
 
-        if self._client is not None:
-            return await self._generate_with_client(
-                self._client,
-                prompt=prompt,
-                model=model,
-                reference_images=refs,
-                size=size,
-                headers=headers,
-            )
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        client = self._client or httpx.AsyncClient(timeout=self.timeout)
+        try:
             return await self._generate_with_client(
                 client,
                 prompt=prompt,
@@ -298,6 +366,9 @@ class AIHubMixImageGenerationClient:
                 size=size,
                 headers=headers,
             )
+        finally:
+            if self._client is None:
+                await client.aclose()
 
     async def _generate_with_client(
         self,
@@ -327,10 +398,11 @@ class AIHubMixImageGenerationClient:
         model_path = _aihubmix_model_path(model)
         url = f"{self.api_base}/models/{model_path}/predictions"
         try:
-            response = await client.post(
+            response = await self._http_post(
                 url,
                 headers={**headers, "Content-Type": "application/json"},
-                json=body,
+                body=body,
+                client=client,
             )
         except httpx.TimeoutException as exc:
             raise ImageGenerationError("AIHubMix image generation timed out") from exc
@@ -346,11 +418,7 @@ class AIHubMixImageGenerationClient:
         payload = response.json()
         images = await _aihubmix_images_from_payload(client, payload)
 
-        if not images:
-            provider_error = payload.get("error") if isinstance(payload, dict) else None
-            if provider_error:
-                raise ImageGenerationError(f"AIHubMix returned no images: {provider_error}")
-            raise ImageGenerationError("AIHubMix returned no images for this request")
+        self._ensure_images(images, payload)
 
         return GeneratedImageResponse(images=images, content="", raw=payload)
 
@@ -370,31 +438,25 @@ def _http_error_detail(response: httpx.Response) -> str:
     return response.text[:500] or "<empty response body>"
 
 
-class GeminiImageGenerationClient:
+class GeminiImageGenerationClient(ImageGenerationProvider):
     """Async client for Gemini/Imagen image generation via the Generative Language API."""
 
-    def __init__(
-        self,
-        *,
-        api_key: str | None,
-        api_base: str | None = None,
-        extra_headers: dict[str, str] | None = None,
-        extra_body: dict[str, Any] | None = None,
-        timeout: float = _GEMINI_DEFAULT_TIMEOUT_S,
-        client: httpx.AsyncClient | None = None,
-    ) -> None:
-        self.api_key = api_key
-        # The Gemini provider's registry default_api_base is the OpenAI-compat
-        # shim (.../v1beta/openai/), which has no image endpoints. Image
-        # generation needs the native Generative Language API base, so we don't
-        # use _provider_base_url() here.
-        self.api_base = (
-            api_base or "https://generativelanguage.googleapis.com/v1beta"
-        ).rstrip("/")
-        self.extra_headers = extra_headers or {}
-        self.extra_body = extra_body or {}
-        self.timeout = timeout
-        self._client = client
+    provider_name = "gemini"
+    missing_key_message = (
+        "Gemini API key is not configured. Set providers.gemini.apiKey."
+    )
+    default_timeout = _GEMINI_DEFAULT_TIMEOUT_S
+
+    def _default_base_url(self) -> str:
+        return "https://generativelanguage.googleapis.com/v1beta"
+
+    def _resolve_base_url(self, api_base: str | None) -> str:
+        # Gemini chat completions use the registry's OpenAI-compatible shim.
+        # Image generation must hit the native Generative Language API, so we
+        # intentionally bypass the shared registry lookup here.
+        if api_base:
+            return api_base.rstrip("/")
+        return self._default_base_url()
 
     async def generate(
         self,
@@ -406,9 +468,7 @@ class GeminiImageGenerationClient:
         image_size: str | None = None,
     ) -> GeneratedImageResponse:
         if not self.api_key:
-            raise ImageGenerationError(
-                "Gemini API key is not configured. Set providers.gemini.apiKey."
-            )
+            raise ImageGenerationError(self.missing_key_message)
         if "imagen" in model.lower():
             if reference_images:
                 logger.warning(
@@ -446,12 +506,7 @@ class GeminiImageGenerationClient:
             "Content-Type": "application/json",
             **self.extra_headers,
         }
-
-        if self._client is not None:
-            response = await self._client.post(url, headers=headers, json=body)
-        else:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, headers=headers, json=body)
+        response = await self._http_post(url, headers=headers, body=body)
 
         try:
             response.raise_for_status()
@@ -472,11 +527,7 @@ class GeminiImageGenerationClient:
             if isinstance(b64, str) and b64:
                 images.append(f"data:{mime};base64,{b64}")
 
-        if not images:
-            provider_error = data.get("error") if isinstance(data, dict) else None
-            if provider_error:
-                raise ImageGenerationError(f"Gemini Imagen returned no images: {provider_error}")
-            raise ImageGenerationError("Gemini Imagen returned no images for this request")
+        self._ensure_images(images, data)
 
         return GeneratedImageResponse(images=images, content="", raw=data)
 
@@ -504,12 +555,7 @@ class GeminiImageGenerationClient:
             "Content-Type": "application/json",
             **self.extra_headers,
         }
-
-        if self._client is not None:
-            response = await self._client.post(url, headers=headers, json=body)
-        else:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, headers=headers, json=body)
+        response = await self._http_post(url, headers=headers, body=body)
 
         try:
             response.raise_for_status()
@@ -539,11 +585,7 @@ class GeminiImageGenerationClient:
                     if b64:
                         images.append(f"data:{mime};base64,{b64}")
 
-        if not images:
-            provider_error = data.get("error") if isinstance(data, dict) else None
-            if provider_error:
-                raise ImageGenerationError(f"Gemini returned no images: {provider_error}")
-            raise ImageGenerationError("Gemini returned no images for this request")
+        self._ensure_images(images, data)
 
         return GeneratedImageResponse(
             images=images,
@@ -579,13 +621,13 @@ async def _aihubmix_images_from_payload(
 
         b64_json = value.get("b64_json")
         if isinstance(b64_json, str) and b64_json:
-            images.append(_b64_png_data_url(b64_json))
+            images.append(_b64_image_data_url(b64_json))
         elif b64_json is not None:
             await collect(b64_json)
 
         bytes_base64 = value.get("bytesBase64") or value.get("bytes_base64") or value.get("base64")
         if isinstance(bytes_base64, str) and bytes_base64:
-            images.append(_b64_png_data_url(bytes_base64))
+            images.append(_b64_image_data_url(bytes_base64))
 
         image_url = value.get("image_url") or value.get("imageUrl")
         if isinstance(image_url, dict):
@@ -620,29 +662,17 @@ _MINIMAX_ASPECT_RATIO_SIZES = {
 }
 
 
-class MiniMaxImageGenerationClient:
+class MiniMaxImageGenerationClient(ImageGenerationProvider):
     """Async client for MiniMax image generation API."""
 
-    def __init__(
-        self,
-        *,
-        api_key: str | None,
-        api_base: str | None = None,
-        extra_headers: dict[str, str] | None = None,
-        extra_body: dict[str, Any] | None = None,
-        timeout: float = _MINIMAX_TIMEOUT_S,
-        client: httpx.AsyncClient | None = None,
-    ) -> None:
-        self.api_key = api_key
-        self.api_base = _provider_base_url(
-            "minimax",
-            api_base,
-            "https://api.minimaxi.com/v1",
-        )
-        self.extra_headers = extra_headers or {}
-        self.extra_body = extra_body or {}
-        self.timeout = timeout
-        self._client = client
+    provider_name = "minimax"
+    missing_key_message = (
+        "MiniMax API key is not configured. Set providers.minimax.apiKey."
+    )
+    default_timeout = _MINIMAX_TIMEOUT_S
+
+    def _default_base_url(self) -> str:
+        return "https://api.minimaxi.com/v1"
 
     def _resolve_aspect_ratio(self, aspect_ratio: str | None) -> str:
         if aspect_ratio and aspect_ratio in _MINIMAX_ASPECT_RATIO_SIZES:
@@ -659,9 +689,7 @@ class MiniMaxImageGenerationClient:
         image_size: str | None = None,
     ) -> GeneratedImageResponse:
         if not self.api_key:
-            raise ImageGenerationError(
-                "MiniMax API key is not configured. Set providers.minimax.apiKey."
-            )
+            raise ImageGenerationError(self.missing_key_message)
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -687,20 +715,16 @@ class MiniMaxImageGenerationClient:
 
         body.update(self.extra_body)
 
-        if self._client is not None:
-            return await self._generate_with_client(self._client, body, headers)
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            return await self._generate_with_client(client, body, headers)
+        return await self._generate_with_client(body, headers)
 
     async def _generate_with_client(
         self,
-        client: httpx.AsyncClient,
         body: dict[str, Any],
         headers: dict[str, str],
     ) -> GeneratedImageResponse:
         url = f"{self.api_base}/image_generation"
         try:
-            response = await client.post(url, headers=headers, json=body)
+            response = await self._http_post(url, headers=headers, body=body)
         except httpx.TimeoutException as exc:
             raise ImageGenerationError("MiniMax image generation timed out") from exc
         except httpx.RequestError as exc:
@@ -715,11 +739,7 @@ class MiniMaxImageGenerationClient:
         payload = response.json()
         images = _minimax_images_from_payload(payload)
 
-        if not images:
-            provider_error = payload.get("error") if isinstance(payload, dict) else None
-            if provider_error:
-                raise ImageGenerationError(f"MiniMax returned no images: {provider_error}")
-            raise ImageGenerationError("MiniMax returned no images for this request")
+        self._ensure_images(images, payload)
 
         return GeneratedImageResponse(images=images, content="", raw=payload)
 
@@ -735,5 +755,139 @@ def _minimax_images_from_payload(payload: dict[str, Any]) -> list[str]:
         return images
     for b64 in data.get("image_base64") or []:
         if isinstance(b64, str) and b64:
-            images.append(_b64_png_data_url(b64))
+            images.append(_b64_image_data_url(b64))
     return images
+
+
+# ---------------------------------------------------------------------------
+# StepFun (阶跃星辰) image generation
+# ---------------------------------------------------------------------------
+
+_STEPFUN_ASPECT_RATIO_SIZES = {
+    "1:1": "1024x1024",
+    "16:9": "1280x800",
+    "9:16": "800x1280",
+    "3:4": "768x1360",
+    "4:3": "1360x768",
+}
+
+
+class StepFunImageGenerationClient(ImageGenerationProvider):
+    """Async client for StepFun (阶跃星辰) image generation.
+
+    Supports:
+    - Text-to-image via step-image-edit-2 (default model)
+    - Reference-image-guided generation via style_reference (step-1x-medium)
+    """
+
+    provider_name = "stepfun"
+    missing_key_message = (
+        "StepFun API key is not configured. Set providers.stepfun.apiKey."
+    )
+    default_timeout = 120.0
+
+    def _default_base_url(self) -> str:
+        return "https://api.stepfun.com/v1"
+
+    async def generate(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        reference_images: list[str] | None = None,
+        aspect_ratio: str | None = None,
+        image_size: str | None = None,
+    ) -> GeneratedImageResponse:
+        if not self.api_key:
+            raise ImageGenerationError(self.missing_key_message)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            **self.extra_headers,
+        }
+
+        body: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "response_format": "b64_json",
+            "n": 1,
+        }
+
+        # Map aspect ratio / image_size to StepFun size string
+        size = _stepfun_size(aspect_ratio, image_size)
+        if size:
+            body["size"] = size
+
+        # step-1x-medium supports style_reference for reference-image-guided generation
+        refs = list(reference_images or [])
+        if refs and "1x" in model:
+            body["style_reference"] = {
+                "source_url": image_path_to_data_url(refs[0]),
+            }
+
+        body.update(self.extra_body)
+
+        response = await self._http_post(
+            f"{self.api_base}/images/generations",
+            headers=headers,
+            body=body,
+        )
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = response.text[:500]
+            raise ImageGenerationError(
+                f"StepFun image generation failed: {detail}"
+            ) from exc
+
+        payload = response.json()
+        images = _stepfun_images_from_payload(payload)
+
+        self._ensure_images(images, payload)
+
+        return GeneratedImageResponse(images=images, content="", raw=payload)
+
+
+def _stepfun_size(
+    aspect_ratio: str | None,
+    image_size: str | None,
+) -> str:
+    """Resolve aspect ratio / image_size to StepFun size string.
+
+    StepFun expects ``WIDTHxHEIGHT`` (note: width x height, not the more
+    common ``HxW`` order used by other providers).  The accepted sizes are
+    ``1024x1024``, ``768x1360``, ``896x1184``, ``1360x768``, ``1184x896``.
+    """
+    if image_size and "x" in image_size.lower():
+        return image_size
+    if aspect_ratio and aspect_ratio in _STEPFUN_ASPECT_RATIO_SIZES:
+        return _STEPFUN_ASPECT_RATIO_SIZES[aspect_ratio]
+    return "1024x1024"
+
+
+def _stepfun_images_from_payload(payload: dict[str, Any]) -> list[str]:
+    """Extract base64 images from StepFun API response.
+
+    StepFun returns images in ``data[].b64_json`` (base64 strings).
+    """
+    images: list[str] = []
+    for item in payload.get("data") or []:
+        if not isinstance(item, dict):
+            continue
+        b64 = item.get("b64_json")
+        if isinstance(b64, str) and b64:
+            images.append(_b64_image_data_url(b64))
+    return images
+
+
+# ---------------------------------------------------------------------------
+# Provider registration
+# ---------------------------------------------------------------------------
+
+register_image_gen_provider(OpenRouterImageGenerationClient)
+register_image_gen_provider(AIHubMixImageGenerationClient)
+register_image_gen_provider(GeminiImageGenerationClient)
+register_image_gen_provider(MiniMaxImageGenerationClient)
+register_image_gen_provider(StepFunImageGenerationClient)
