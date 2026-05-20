@@ -101,10 +101,9 @@ class _SearchTool(_FsTool):
     _IGNORE_DIRS = set(ListDirTool._IGNORE_DIRS)
 
     def _display_path(self, target: Path, root: Path) -> str:
-        workspace = self._display_workspace()
-        if workspace:
+        if self._workspace:
             with suppress(ValueError):
-                return target.relative_to(workspace).as_posix()
+                return target.relative_to(self._workspace).as_posix()
         return target.relative_to(root).as_posix()
 
     def _iter_files(self, root: Path) -> Iterable[Path]:
@@ -131,10 +130,8 @@ class FindFilesTool(_SearchTool):
     def description(self) -> str:
         return (
             "Find files by path fragment, glob, or file type. "
-            "Use this before read_file when you need to locate files, and "
-            "prefer it over shell find/ls for ordinary workspace discovery. "
-            "Returns workspace-relative paths and skips common dependency/build "
-            "directories."
+            "Use this before read_file when you need to locate files. "
+            "Returns workspace-relative paths and skips common dependency/build directories."
         )
 
     @property
@@ -292,8 +289,7 @@ class GrepTool(_SearchTool):
         return (
             "Search file contents with a regex pattern. "
             "Default output_mode is files_with_matches (file paths only); "
-            "use content mode for matching lines with context. Prefer this "
-            "over shell grep for ordinary workspace searches. "
+            "use content mode for matching lines with context. "
             "Skips binary and files >2 MB. Supports glob/type filtering."
         )
 

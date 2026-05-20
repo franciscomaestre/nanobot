@@ -37,10 +37,7 @@ def test_exec_keeps_one_shot_behavior_without_yield_time_ms(tmp_path):
 def test_exec_accepts_command_aliases(tmp_path):
     async def run() -> str:
         tool = ExecTool(working_dir="/")
-        return await tool.execute(
-            cmd=_python_command("import os; print(os.getcwd())"),
-            workdir=str(tmp_path),
-        )
+        return await tool.execute(cmd="pwd", workdir=str(tmp_path))
 
     result = asyncio.run(run())
 
@@ -159,13 +156,13 @@ def test_write_stdin_can_close_stdin(tmp_path):
             "data=sys.stdin.read(); print('got:' + data, flush=True)"
         )
 
-        initial = await exec_tool.execute(command=command, yield_time_ms=1500)
+        initial = await exec_tool.execute(command=command, yield_time_ms=500)
         sid = _session_id(initial)
         result = await stdin_tool.execute(
             session_id=sid,
             chars="payload",
             close_stdin=True,
-            yield_time_ms=1500,
+            yield_time_ms=1000,
         )
         return initial, result
 
@@ -246,65 +243,6 @@ def test_write_stdin_preserves_completed_session_output_until_polled(tmp_path):
     assert "ready" in initial
     assert "done" in final
     assert "Exit code: 0" in final
-
-
-def test_write_stdin_can_wait_for_expected_output(tmp_path):
-    async def run() -> tuple[str, str, str]:
-        manager = ExecSessionManager()
-        exec_tool = ExecTool(working_dir=str(tmp_path), timeout=5, session_manager=manager)
-        stdin_tool = WriteStdinTool(manager=manager)
-        command = _python_command(
-            "import time; print('booting', flush=True); "
-            "time.sleep(0.4); print('ready', flush=True); time.sleep(5)"
-        )
-
-        initial = await exec_tool.execute(command=command, yield_time_ms=100)
-        sid = _session_id(initial)
-        waited = await stdin_tool.execute(
-            session_id=sid,
-            wait_for="ready",
-            wait_timeout_ms=3000,
-            yield_time_ms=0,
-        )
-        cleanup = await stdin_tool.execute(session_id=sid, terminate=True, yield_time_ms=0)
-        return initial, waited, cleanup
-
-    initial, waited, cleanup = asyncio.run(run())
-
-    assert "Process running" in initial
-    assert "booting" in initial + waited
-    assert "ready" in waited
-    assert "Wait target not observed" not in waited
-    assert "Session terminated." in cleanup
-
-
-def test_write_stdin_wait_for_reports_timeout_without_killing_session(tmp_path):
-    async def run() -> tuple[str, str, str]:
-        manager = ExecSessionManager()
-        exec_tool = ExecTool(working_dir=str(tmp_path), timeout=5, session_manager=manager)
-        stdin_tool = WriteStdinTool(manager=manager)
-        command = _python_command(
-            "import time; print('booting', flush=True); time.sleep(5)"
-        )
-
-        initial = await exec_tool.execute(command=command, yield_time_ms=100)
-        sid = _session_id(initial)
-        waited = await stdin_tool.execute(
-            session_id=sid,
-            wait_for="never-ready",
-            wait_timeout_ms=200,
-            yield_time_ms=0,
-        )
-        cleanup = await stdin_tool.execute(session_id=sid, terminate=True, yield_time_ms=0)
-        return initial, waited, cleanup
-
-    initial, waited, cleanup = asyncio.run(run())
-
-    assert "Process running" in initial
-    assert "booting" in initial + waited
-    assert "Process running" in waited
-    assert "Wait target not observed: 'never-ready'" in waited
-    assert "Session terminated." in cleanup
 
 
 def test_exec_session_mode_reuses_exec_safety_guard(tmp_path):

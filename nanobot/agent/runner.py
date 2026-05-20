@@ -19,7 +19,9 @@ from nanobot.utils.file_edit_events import (
     build_file_edit_end_event,
     build_file_edit_error_event,
     build_file_edit_start_event,
-    prepare_file_edit_tracker,
+    prepare_file_edit_tracker as _prepare_file_edit_tracker,
+    prepare_file_edit_trackers,
+    StreamingFileEditTracker,
 )
 from nanobot.utils.helpers import (
     IncrementalThinkExtractor,
@@ -32,7 +34,10 @@ from nanobot.utils.helpers import (
     strip_think,
     truncate_text,
 )
-from nanobot.utils.progress_events import invoke_file_edit_progress
+from nanobot.utils.progress_events import (
+    invoke_file_edit_progress,
+    on_progress_accepts_file_edit_events,
+)
 from nanobot.utils.prompt_templates import render_template
 from nanobot.utils.runtime import (
     EMPTY_FINAL_RESPONSE_MESSAGE,
@@ -54,11 +59,14 @@ _SNIP_SAFETY_BUFFER = 1024
 _MICROCOMPACT_KEEP_RECENT = 10
 _MICROCOMPACT_MIN_CHARS = 500
 _COMPACTABLE_TOOLS = frozenset({
-    "read_file", "exec", "grep",
-    "web_search", "web_fetch", "list_dir",
+    "read_file", "exec", "grep", "find_files",
+    "web_search", "web_fetch", "list_dir", "list_exec_sessions",
 })
 _BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
 
+# Backward-compatible module attribute for tests/extensions that monkeypatch
+# the former single-file tracker hook. Runtime uses prepare_file_edit_trackers.
+prepare_file_edit_tracker = _prepare_file_edit_tracker
 
 
 @dataclass(slots=True)
@@ -626,6 +634,24 @@ class AgentRunner:
         )
 
         progress_state: dict[str, bool] | None = None
+        live_file_edits: StreamingFileEditTracker | None = None
+
+        if (
+            spec.progress_callback is not None
+            and on_progress_accepts_file_edit_events(spec.progress_callback)
+        ):
+            async def _emit_live_file_edits(events: list[dict[str, Any]]) -> None:
+                await invoke_file_edit_progress(spec.progress_callback, events)
+
+            live_file_edits = StreamingFileEditTracker(
+                workspace=spec.workspace,
+                tools=spec.tools,
+                emit=_emit_live_file_edits,
+            )
+
+        async def _tool_call_delta(delta: dict[str, Any]) -> None:
+            if live_file_edits is not None:
+                await live_file_edits.update(delta)
 
         if wants_streaming:
             async def _stream(delta: str) -> None:
@@ -643,6 +669,7 @@ class AgentRunner:
                 **kwargs,
                 on_content_delta=_stream,
                 on_thinking_delta=_thinking,
+                on_tool_call_delta=_tool_call_delta if live_file_edits is not None else None,
             )
         elif wants_progress_streaming:
             stream_buf = ""
@@ -672,6 +699,7 @@ class AgentRunner:
             coro = self.provider.chat_stream_with_retry(
                 **kwargs,
                 on_content_delta=_stream_progress,
+                on_tool_call_delta=_tool_call_delta if live_file_edits is not None else None,
             )
         else:
             coro = self.provider.chat_with_retry(**kwargs)
@@ -686,6 +714,14 @@ class AgentRunner:
                 await coro if outer_timeout_s is None
                 else await asyncio.wait_for(coro, timeout=outer_timeout_s)
             )
+            if live_file_edits is not None:
+                await live_file_edits.flush()
+                if response.should_execute_tools:
+                    live_file_edits.apply_final_call_ids(response.tool_calls)
+                await live_file_edits.error_unmatched(
+                    response.tool_calls if response.should_execute_tools else [],
+                    "Tool call did not complete.",
+                )
         except asyncio.TimeoutError:
             if outer_timeout_s is None:
                 return LLMResponse(
@@ -820,20 +856,29 @@ class AgentRunner:
             return prep_error + hint, event, (
                 RuntimeError(prep_error) if spec.fail_on_tool_error else None
             )
-        file_edit_tracker = prepare_file_edit_tracker(
-            call_id=tool_call.id,
-            tool_name=tool_call.name,
-            tool=tool,
-            workspace=spec.workspace,
-            params=params if isinstance(params, dict) else None,
+        emit_file_edit_events = (
+            spec.progress_callback is not None
+            and on_progress_accepts_file_edit_events(spec.progress_callback)
         )
-        if file_edit_tracker is not None and spec.progress_callback is not None:
+        progress_callback = spec.progress_callback if emit_file_edit_events else None
+        file_edit_trackers = (
+            prepare_file_edit_trackers(
+                call_id=tool_call.id,
+                tool_name=tool_call.name,
+                tool=tool,
+                workspace=spec.workspace,
+                params=params if isinstance(params, dict) else None,
+            )
+            if progress_callback is not None
+            else None
+        )
+        if file_edit_trackers and progress_callback is not None:
             await invoke_file_edit_progress(
-                spec.progress_callback,
+                progress_callback,
                 [build_file_edit_start_event(
                     file_edit_tracker,
                     params if isinstance(params, dict) else None,
-                )],
+                ) for file_edit_tracker in file_edit_trackers],
             )
         try:
             if tool is not None:
@@ -843,10 +888,13 @@ class AgentRunner:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
-            if file_edit_tracker is not None and spec.progress_callback is not None:
+            if file_edit_trackers and progress_callback is not None:
                 await invoke_file_edit_progress(
-                    spec.progress_callback,
-                    [build_file_edit_error_event(file_edit_tracker, str(exc))],
+                    progress_callback,
+                    [
+                        build_file_edit_error_event(file_edit_tracker, str(exc))
+                        for file_edit_tracker in file_edit_trackers
+                    ],
                 )
             event = {
                 "name": tool_call.name,
@@ -869,10 +917,13 @@ class AgentRunner:
             return payload, event, None
 
         if isinstance(result, str) and result.startswith("Error"):
-            if file_edit_tracker is not None and spec.progress_callback is not None:
+            if file_edit_trackers and progress_callback is not None:
                 await invoke_file_edit_progress(
-                    spec.progress_callback,
-                    [build_file_edit_error_event(file_edit_tracker, result)],
+                    progress_callback,
+                    [
+                        build_file_edit_error_event(file_edit_tracker, result)
+                        for file_edit_tracker in file_edit_trackers
+                    ],
                 )
             event = {
                 "name": tool_call.name,
@@ -892,10 +943,13 @@ class AgentRunner:
                 return result + hint, event, RuntimeError(result)
             return result + hint, event, None
 
-        if file_edit_tracker is not None and spec.progress_callback is not None:
+        if file_edit_trackers and progress_callback is not None:
             await invoke_file_edit_progress(
-                spec.progress_callback,
-                [build_file_edit_end_event(file_edit_tracker)],
+                progress_callback,
+                [build_file_edit_end_event(
+                    file_edit_tracker,
+                    params if isinstance(params, dict) else None,
+                ) for file_edit_tracker in file_edit_trackers],
             )
 
         detail = "" if result is None else str(result)

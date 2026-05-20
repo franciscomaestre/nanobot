@@ -16,8 +16,6 @@ from nanobot.agent.tools.schema import BooleanSchema, IntegerSchema, StringSchem
 
 DEFAULT_YIELD_MS = 1000
 MAX_YIELD_MS = 30_000
-DEFAULT_WAIT_FOR_MS = 10_000
-MAX_WAIT_FOR_MS = 120_000
 DEFAULT_MAX_OUTPUT_CHARS = 10_000
 MAX_OUTPUT_CHARS = 50_000
 
@@ -53,15 +51,14 @@ class _ExecSession:
         process: asyncio.subprocess.Process,
         command: str,
         cwd: str,
-        timeout: int | None,
+        timeout: int,
     ) -> None:
         self.session_id = session_id
         self.process = process
         self.command = command
         self.cwd = cwd
         self.started_at = time.monotonic()
-        # timeout None/0 means no limit; an infinite deadline is never reached.
-        self.deadline = time.monotonic() + timeout if timeout else float("inf")
+        self.deadline = time.monotonic() + timeout
         self.last_access = time.monotonic()
         self._chunks: list[str] = []
         self._lock = asyncio.Lock()
@@ -170,7 +167,7 @@ class ExecSessionManager:
         command: str,
         cwd: str,
         env: dict[str, str],
-        timeout: int | None,
+        timeout: int,
         shell_program: str | None,
         login: bool,
         yield_time_ms: int,
@@ -359,18 +356,6 @@ def format_session_poll(session_id: str, poll: _SessionPoll) -> str:
             minimum=0,
             maximum=MAX_YIELD_MS,
         ),
-        wait_for=StringSchema(
-            "Optional text to wait for in output before returning. "
-            "Useful for interactive commands and dev servers.",
-            nullable=True,
-        ),
-        wait_timeout_ms=IntegerSchema(
-            DEFAULT_WAIT_FOR_MS,
-            description="Maximum milliseconds to wait for wait_for text (default 10000, max 120000).",
-            minimum=0,
-            maximum=MAX_WAIT_FOR_MS,
-            nullable=True,
-        ),
         max_output_chars=IntegerSchema(
             DEFAULT_MAX_OUTPUT_CHARS,
             description="Maximum output characters to return from this poll (default 10000, max 50000).",
@@ -425,12 +410,10 @@ class WriteStdinTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Interact with a running exec session created by exec with "
-            "yield_time_ms. Use chars='' to poll without writing, chars to send "
-            "stdin, close_stdin=true to send EOF, or terminate=true to stop the "
-            "process. Use wait_for with wait_timeout_ms for dev servers, test "
-            "watchers, and prompts where you need to wait for expected output. "
-            "Do not use this to start new commands; start them with exec."
+            "Write text to a running exec session and return recent output. "
+            "Use chars='' to poll without writing. Set close_stdin=true to send EOF, "
+            "or terminate=true to stop the session. Sessions finish automatically "
+            "when their process exits."
         )
 
     async def execute(
@@ -440,8 +423,6 @@ class WriteStdinTool(Tool):
         close_stdin: bool = False,
         terminate: bool = False,
         yield_time_ms: int | None = None,
-        wait_for: str | None = None,
-        wait_timeout_ms: int | None = None,
         max_output_chars: int | None = None,
         max_output_tokens: int | None = None,
         **kwargs: Any,
@@ -449,81 +430,24 @@ class WriteStdinTool(Tool):
         try:
             if max_output_chars is None:
                 max_output_chars = max_output_tokens
-            output_limit = clamp_session_int(
-                max_output_chars,
-                DEFAULT_MAX_OUTPUT_CHARS,
-                1000,
-                MAX_OUTPUT_CHARS,
-            )
-            if wait_for:
-                return await self._wait_for_output(
-                    session_id=session_id,
-                    chars=chars,
-                    close_stdin=close_stdin,
-                    terminate=terminate,
-                    wait_for=wait_for,
-                    wait_timeout_ms=clamp_session_int(
-                        wait_timeout_ms,
-                        DEFAULT_WAIT_FOR_MS,
-                        0,
-                        MAX_WAIT_FOR_MS,
-                    ),
-                    max_output_chars=output_limit,
-                )
             poll = await self._manager.write(
                 session_id=session_id,
                 chars=chars,
                 close_stdin=close_stdin,
                 terminate=terminate,
                 yield_time_ms=clamp_session_int(yield_time_ms, DEFAULT_YIELD_MS, 0, MAX_YIELD_MS),
-                max_output_chars=output_limit,
+                max_output_chars=clamp_session_int(
+                    max_output_chars,
+                    DEFAULT_MAX_OUTPUT_CHARS,
+                    1000,
+                    MAX_OUTPUT_CHARS,
+                ),
             )
             return format_session_poll(session_id, poll)
         except KeyError:
             return f"Error: exec session not found: {session_id}"
         except Exception as exc:
             return f"Error writing to exec session: {exc}"
-
-    async def _wait_for_output(
-        self,
-        *,
-        session_id: str,
-        chars: str | None,
-        close_stdin: bool,
-        terminate: bool,
-        wait_for: str,
-        wait_timeout_ms: int,
-        max_output_chars: int,
-    ) -> str:
-        deadline = time.monotonic() + (wait_timeout_ms / 1000)
-        aggregate: list[str] = []
-        first = True
-        poll: _SessionPoll | None = None
-
-        while True:
-            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
-            step_ms = min(500, remaining_ms)
-            poll = await self._manager.write(
-                session_id=session_id,
-                chars=chars if first else None,
-                close_stdin=close_stdin if first else False,
-                terminate=terminate if first else False,
-                yield_time_ms=step_ms,
-                max_output_chars=max_output_chars,
-            )
-            first = False
-            if poll.output:
-                aggregate.append(poll.output)
-                joined = "".join(aggregate)
-                if wait_for in joined:
-                    poll.output = joined
-                    return format_session_poll(session_id, poll)
-            if poll.done or remaining_ms <= 0:
-                poll.output = "".join(aggregate)
-                result = format_session_poll(session_id, poll)
-                if wait_for not in poll.output:
-                    result += f"\nWait target not observed: {wait_for!r}"
-                return result
 
 
 @tool_parameters(tool_parameters_schema())
@@ -563,8 +487,7 @@ class ListExecSessionsTool(Tool):
         return (
             "List active long-running exec sessions, including session_id, cwd, "
             "elapsed time, idle time, remaining timeout, and command preview. "
-            "Use this to recover a session_id after context shifts before "
-            "polling, writing stdin, or terminating with write_stdin."
+            "Use this to recover a session_id before polling with write_stdin."
         )
 
     @property
