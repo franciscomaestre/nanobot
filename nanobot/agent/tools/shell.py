@@ -412,8 +412,7 @@ class ExecTool(Tool):
             )
         shell_program = shell_program or shutil.which("bash") or "/bin/bash"
         args = [shell_program]
-        shell_name = Path(shell_program).name.lower()
-        if login and shell_name in {"bash", "bash.exe", "zsh", "zsh.exe"}:
+        if login and Path(shell_program).name in {"bash", "zsh"}:
             args.append("-l")
         args.extend(["-c", command])
         return await asyncio.create_subprocess_exec(
@@ -586,7 +585,7 @@ class ExecTool(Tool):
         # Windows: match drive-root paths like `C:\` as well as `C:\path\to\file`, and UNC paths like `\\server\share`
         # NOTE: `*` is required so `C:\` (nothing after the slash) is still extracted.
         win_paths = re.findall(
-            r"(?<![A-Za-z])(?:[A-Za-z]:[^\s\"'|><;]*|\\\\[^\s\"'|><;]+(?:\\[^\s\"'|><;]+)*)",
+            r"(?:[A-Za-z]:[^\s\"'|><;]*|\\\\[^\s\"'|><;]+(?:\\[^\s\"'|><;]+)*)",
             command
         )
         posix_paths = re.findall(r"(?:^|[\s|>'\"])(/[^\s\"'>;|<]+)", command) # POSIX: /absolute only
