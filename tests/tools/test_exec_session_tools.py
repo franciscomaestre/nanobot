@@ -37,10 +37,7 @@ def test_exec_keeps_one_shot_behavior_without_yield_time_ms(tmp_path):
 def test_exec_accepts_command_aliases(tmp_path):
     async def run() -> str:
         tool = ExecTool(working_dir="/")
-        return await tool.execute(
-            cmd=_python_command("import os; print(os.getcwd())"),
-            workdir=str(tmp_path),
-        )
+        return await tool.execute(cmd="pwd", workdir=str(tmp_path))
 
     result = asyncio.run(run())
 
@@ -159,13 +156,13 @@ def test_write_stdin_can_close_stdin(tmp_path):
             "data=sys.stdin.read(); print('got:' + data, flush=True)"
         )
 
-        initial = await exec_tool.execute(command=command, yield_time_ms=1500)
+        initial = await exec_tool.execute(command=command, yield_time_ms=500)
         sid = _session_id(initial)
         result = await stdin_tool.execute(
             session_id=sid,
             chars="payload",
             close_stdin=True,
-            yield_time_ms=1500,
+            yield_time_ms=1000,
         )
         return initial, result
 
