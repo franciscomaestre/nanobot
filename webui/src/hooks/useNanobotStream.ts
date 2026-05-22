@@ -13,7 +13,6 @@ import type {
   InboundEvent,
   OutboundCliAppMention,
   OutboundImageGeneration,
-  OutboundMcpPresetMention,
   OutboundMedia,
   GoalStateWsPayload,
   UIImage,
@@ -314,7 +313,6 @@ export interface SendImage {
 export interface SendOptions {
   imageGeneration?: OutboundImageGeneration;
   cliApps?: OutboundCliAppMention[];
-  mcpPresets?: OutboundMcpPresetMention[];
 }
 
 export function useNanobotStream(
@@ -522,28 +520,15 @@ export function useNanobotStream(
           resolveActiveAssistantIndex(next)
           ?? findStreamingAssistantIndex(next, closedAssistantStreamIdsRef.current)
           ?? findLatestAssistantAnswerIndex(next);
-          if (targetIndex !== null) {
-            const target = next[targetIndex];
-            next = replaceMessageAt(next, targetIndex, {
-              ...target,
-              content: finalAnswerText,
-              isStreaming: true,
-            });
-          } else {
-            const id = crypto.randomUUID();
-            closedAssistantStreamIdsRef.current.add(id);
-            next = [
-              ...next,
-              {
-                id,
-                role: "assistant",
-                content: finalAnswerText,
-                isStreaming: true,
-                createdAt: Date.now(),
-              },
-            ];
-          }
+        if (targetIndex !== null) {
+          const target = next[targetIndex];
+          next = replaceMessageAt(next, targetIndex, {
+            ...target,
+            content: finalAnswerText,
+            isStreaming: true,
+          });
         }
+      }
       if (options?.closeAnswerSegment) closeActiveAssistantStream();
       return next;
     });
@@ -893,7 +878,6 @@ export function useNanobotStream(
             createdAt: Date.now(),
             ...(previews ? { images: previews } : {}),
             ...(options?.cliApps?.length ? { cliApps: options.cliApps } : {}),
-            ...(options?.mcpPresets?.length ? { mcpPresets: options.mcpPresets } : {}),
           },
         ];
       });
