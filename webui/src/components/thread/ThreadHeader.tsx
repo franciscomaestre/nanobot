@@ -9,7 +9,7 @@ interface ThreadHeaderProps {
   onToggleSidebar: () => void;
   theme: "light" | "dark";
   onToggleTheme: () => void;
-  hideSidebarToggleForHostChrome?: boolean;
+  hideSidebarToggleOnDesktop?: boolean;
   minimal?: boolean;
 }
 
@@ -18,7 +18,7 @@ export function ThreadHeader({
   onToggleSidebar,
   theme,
   onToggleTheme,
-  hideSidebarToggleForHostChrome = false,
+  hideSidebarToggleOnDesktop = false,
   minimal = false,
 }: ThreadHeaderProps) {
   const { t } = useTranslation();
@@ -32,7 +32,7 @@ export function ThreadHeader({
           onClick={onToggleSidebar}
           className={cn(
             "h-7 w-7 rounded-md text-muted-foreground hover:bg-accent/35 hover:text-foreground",
-            hideSidebarToggleForHostChrome && "lg:hidden",
+            hideSidebarToggleOnDesktop && "lg:hidden",
           )}
         >
           <Menu className="h-3.5 w-3.5" />
@@ -57,7 +57,7 @@ export function ThreadHeader({
           onClick={onToggleSidebar}
           className={cn(
             "h-7 w-7 rounded-md text-muted-foreground hover:bg-accent/35 hover:text-foreground",
-            hideSidebarToggleForHostChrome && "lg:hidden",
+            hideSidebarToggleOnDesktop && "lg:hidden",
           )}
         >
           <Menu className="h-3.5 w-3.5" />
