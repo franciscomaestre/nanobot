@@ -6,7 +6,7 @@ import {
   AgentActivityCluster,
   isAgentActivityMember,
 } from "@/components/thread/AgentActivityCluster";
-import type { CliAppInfo, McpPresetInfo, UIMessage } from "@/lib/types";
+import type { CliAppInfo, UIMessage } from "@/lib/types";
 
 interface ThreadMessagesProps {
   messages: UIMessage[];
@@ -15,7 +15,6 @@ interface ThreadMessagesProps {
   hiddenMessageCount?: number;
   onLoadEarlier?: () => void;
   cliApps?: CliAppInfo[];
-  mcpPresets?: McpPresetInfo[];
 }
 
 export type DisplayUnit =
@@ -134,7 +133,6 @@ function reasoningOnlyMessageFromAnswer(message: UIMessage): UIMessage {
     reasoningStreaming: message.reasoningStreaming,
     isStreaming: message.reasoningStreaming,
     activitySegmentId: message.activitySegmentId,
-    latencyMs: message.latencyMs,
   };
 }
 
@@ -168,7 +166,6 @@ export function ThreadMessages({
   hiddenMessageCount = 0,
   onLoadEarlier,
   cliApps = [],
-  mcpPresets = [],
 }: ThreadMessagesProps) {
   const { t } = useTranslation();
   const units = useMemo(() => buildDisplayUnits(messages), [messages]);
@@ -205,8 +202,6 @@ export function ThreadMessages({
           unit.type === "cluster"
           && next?.type === "single"
           && next.message.role === "assistant";
-        const turnLatencyMs =
-          unit.type === "cluster" ? activityClusterTurnLatencyMs(unit.messages, next) : undefined;
 
         return (
           <div key={unitKey(unit, index)} className={marginTop}>
@@ -215,9 +210,7 @@ export function ThreadMessages({
                 messages={unit.messages}
                 isTurnStreaming={index === liveActivityClusterIndex}
                 hasBodyBelow={hasBodyBelow}
-                turnLatencyMs={turnLatencyMs}
                 cliApps={cliApps}
-                mcpPresets={mcpPresets}
               />
             ) : (
               <MessageBubble
@@ -228,7 +221,6 @@ export function ThreadMessages({
                     : true
                 }
                 cliApps={cliApps}
-                mcpPresets={mcpPresets}
               />
             )}
           </div>
@@ -236,28 +228,6 @@ export function ThreadMessages({
       })}
     </div>
   );
-}
-
-function activityClusterTurnLatencyMs(
-  messages: UIMessage[],
-  next: DisplayUnit | undefined,
-): number | undefined {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const latency = messages[i].latencyMs;
-    if (typeof latency === "number" && Number.isFinite(latency) && latency >= 0) {
-      return latency;
-    }
-  }
-  if (
-    next?.type === "single"
-    && next.message.role === "assistant"
-    && typeof next.message.latencyMs === "number"
-    && Number.isFinite(next.message.latencyMs)
-    && next.message.latencyMs >= 0
-  ) {
-    return next.message.latencyMs;
-  }
-  return undefined;
 }
 
 function currentActivityClusterIndex(units: DisplayUnit[]): number {

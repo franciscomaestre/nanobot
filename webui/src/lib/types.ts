@@ -53,8 +53,6 @@ export interface UIMessage {
   media?: UIMediaAttachment[];
   /** App-specific CLI adapters explicitly attached to this user turn. */
   cliApps?: UICliAppAttachment[];
-  /** Settings-managed MCP presets explicitly attached to this user turn. */
-  mcpPresets?: UIMcpPresetAttachment[];
   /** Assistant turn: accumulated model reasoning / thinking text. Built up
    * incrementally from ``reasoning_delta`` frames; finalized when
    * ``reasoning_end`` arrives. */
@@ -71,17 +69,6 @@ export interface UICliAppAttachment {
   display_name?: string;
   category?: string;
   entry_point?: string;
-  logo_url?: string | null;
-  brand_color?: string | null;
-}
-
-export interface UIMcpPresetAttachment {
-  name: string;
-  display_name?: string;
-  category?: string;
-  transport?: string;
-  status?: string;
-  configured?: boolean;
   logo_url?: string | null;
   brand_color?: string | null;
 }
@@ -206,7 +193,6 @@ export interface SettingsPayload {
     api_key_hint?: string | null;
     api_base?: string | null;
     default_api_base?: string | null;
-    api_type?: "auto" | "chat_completions" | "responses";
   }>;
   web_search: {
     provider: string;
@@ -308,69 +294,6 @@ export interface CliAppsPayload {
   };
 }
 
-export interface McpPresetField {
-  name: string;
-  label: string;
-  secret: boolean;
-  required: boolean;
-  configured: boolean;
-  placeholder?: string;
-  env_var?: string | null;
-}
-
-export interface McpPresetInfo {
-  name: string;
-  display_name: string;
-  category: string;
-  description: string;
-  docs_url: string;
-  transport: "stdio" | "streamableHttp" | "sse" | "oauth" | string;
-  requires: string;
-  note: string;
-  install_supported: boolean;
-  installed: boolean;
-  configured: boolean;
-  available: boolean;
-  status: "not_installed" | "configured" | "missing_credentials" | "missing_dependency" | "coming_soon" | string;
-  logo_url?: string | null;
-  brand_color?: string | null;
-  required_fields: McpPresetField[];
-  connection_summary: string;
-  tool_count?: number;
-  tool_names?: string[];
-  checked_at?: string | null;
-  error?: string | null;
-  enabled_tools?: string[];
-  source?: "preset" | "custom" | string;
-}
-
-export interface McpPresetsPayload {
-  presets: McpPresetInfo[];
-  installed_count: number;
-  requires_restart?: boolean;
-  hot_reload?: {
-    ok: boolean;
-    message: string;
-    added?: string[];
-    changed?: string[];
-    removed?: string[];
-    retried?: string[];
-    connected?: string[];
-    configured?: string[];
-    failed?: string[];
-    tools_removed?: number;
-    requires_restart?: boolean;
-  };
-  last_action?: {
-    ok: boolean;
-    message: string;
-    tool_count?: number;
-    tool_names?: string[];
-    checked_at?: string | null;
-    error?: string | null;
-  };
-}
-
 export interface SettingsUpdate {
   model?: string;
   provider?: string;
@@ -381,18 +304,10 @@ export interface SettingsUpdate {
   toolHintMaxLength?: number;
 }
 
-export interface ModelConfigurationCreate {
-  name?: string;
-  label: string;
-  provider: string;
-  model: string;
-}
-
 export interface ProviderSettingsUpdate {
   provider: string;
   apiKey?: string;
   apiBase?: string;
-  apiType?: "auto" | "chat_completions" | "responses";
 }
 
 export interface WebSearchSettingsUpdate {
@@ -463,7 +378,6 @@ export type InboundEvent =
       event: "stream_end";
       chat_id: string;
       stream_id?: string;
-      text?: string;
     }
   | {
       event: "reasoning_delta";
@@ -531,17 +445,6 @@ export interface OutboundCliAppMention {
   brand_color?: string | null;
 }
 
-export interface OutboundMcpPresetMention {
-  name: string;
-  display_name?: string;
-  category?: string;
-  transport?: string;
-  status?: string;
-  configured?: boolean;
-  logo_url?: string | null;
-  brand_color?: string | null;
-}
-
 /** Response shape for ``GET .../webui-thread`` (server-built transcript replay). */
 export interface WebuiThreadPersistedPayload {
   schemaVersion: number;
@@ -560,7 +463,6 @@ export type Outbound =
       media?: OutboundMedia[];
       image_generation?: OutboundImageGeneration;
       cli_apps?: OutboundCliAppMention[];
-      mcp_presets?: OutboundMcpPresetMention[];
       /** Marks messages sent by the embedded WebUI, without changing the
        * generic websocket protocol for other clients. */
       webui?: true;

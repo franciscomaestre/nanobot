@@ -20,11 +20,6 @@ import { ThreadViewport } from "@/components/thread/ThreadViewport";
 import { useNanobotStream, type SendImage, type SendOptions } from "@/hooks/useNanobotStream";
 import { useSessionHistory } from "@/hooks/useSessions";
 import { fetchCliApps, listSlashCommands } from "@/lib/api";
-import {
-  CLI_APPS_CHANGED_EVENT,
-  installedCliAppsFromPayload,
-  isCliAppsPayload,
-} from "@/lib/cli-app-events";
 import type { ChatSummary, CliAppInfo, SlashCommand, UIMessage } from "@/lib/types";
 import { normalizeLegacyLongTaskMessages } from "@/lib/thread-display-compat";
 import { scrubSubagentUiMessages } from "@/lib/subagent-channel-display";
@@ -256,7 +251,7 @@ export function ThreadShell({
   const refreshCliApps = useCallback(async () => {
     try {
       const payload = await fetchCliApps(token);
-      setCliApps(installedCliAppsFromPayload(payload));
+      setCliApps(payload.apps.filter((app) => app.installed));
     } catch {
       setCliApps([]);
     }
@@ -267,7 +262,7 @@ export function ThreadShell({
     const load = async () => {
       try {
         const payload = await fetchCliApps(token);
-        if (!cancelled) setCliApps(installedCliAppsFromPayload(payload));
+        if (!cancelled) setCliApps(payload.apps.filter((app) => app.installed));
       } catch {
         if (!cancelled) setCliApps([]);
       }
@@ -280,20 +275,10 @@ export function ThreadShell({
     };
     window.addEventListener("focus", refreshOnFocus);
     document.addEventListener("visibilitychange", refreshOnFocus);
-    const refreshOnCliAppsChanged = (event: Event) => {
-      const payload = (event as CustomEvent<unknown>).detail;
-      if (isCliAppsPayload(payload)) {
-        setCliApps(installedCliAppsFromPayload(payload));
-        return;
-      }
-      void refreshCliApps();
-    };
-    window.addEventListener(CLI_APPS_CHANGED_EVENT, refreshOnCliAppsChanged);
     return () => {
       cancelled = true;
       window.removeEventListener("focus", refreshOnFocus);
       document.removeEventListener("visibilitychange", refreshOnFocus);
-      window.removeEventListener(CLI_APPS_CHANGED_EVENT, refreshOnCliAppsChanged);
     };
   }, [refreshCliApps, token]);
 
