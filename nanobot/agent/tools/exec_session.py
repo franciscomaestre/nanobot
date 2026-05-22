@@ -10,7 +10,6 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
-from nanobot.agent.tools.context import current_request_session_key
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.schema import BooleanSchema, IntegerSchema, StringSchema, tool_parameters_schema
 
@@ -44,7 +43,6 @@ class ExecSessionInfo:
     idle_s: float
     remaining_s: float
     returncode: int | None
-    owner_session_key: str | None = None
 
 
 class _ExecSession:
@@ -56,13 +54,11 @@ class _ExecSession:
         command: str,
         cwd: str,
         timeout: int | None,
-        owner_session_key: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.process = process
         self.command = command
         self.cwd = cwd
-        self.owner_session_key = owner_session_key
         self.started_at = time.monotonic()
         # timeout None/0 means no limit; an infinite deadline is never reached.
         self.deadline = time.monotonic() + timeout if timeout else float("inf")
@@ -179,7 +175,6 @@ class ExecSessionManager:
         login: bool,
         yield_time_ms: int,
         max_output_chars: int,
-        owner_session_key: str | None = None,
     ) -> tuple[str, _SessionPoll]:
         async with self._lock:
             await self._cleanup_locked()
@@ -193,7 +188,6 @@ class ExecSessionManager:
                 command=command,
                 cwd=cwd,
                 timeout=timeout,
-                owner_session_key=owner_session_key,
             )
             self._sessions[session_id] = session
 
@@ -212,18 +206,11 @@ class ExecSessionManager:
         terminate: bool,
         yield_time_ms: int,
         max_output_chars: int,
-        owner_session_key: str | None = None,
     ) -> _SessionPoll:
         async with self._lock:
             await self._cleanup_locked()
             session = self._sessions.get(session_id)
         if session is None:
-            raise KeyError(session_id)
-        if (
-            owner_session_key
-            and session.owner_session_key
-            and session.owner_session_key != owner_session_key
-        ):
             raise KeyError(session_id)
 
         if chars:
@@ -249,7 +236,7 @@ class ExecSessionManager:
                 self._sessions.pop(session_id, None)
         return poll
 
-    async def list(self, *, owner_session_key: str | None = None) -> list[ExecSessionInfo]:
+    async def list(self) -> list[ExecSessionInfo]:
         async with self._lock:
             await self._cleanup_locked()
             now = time.monotonic()
@@ -262,12 +249,8 @@ class ExecSessionManager:
                     idle_s=max(0.0, now - session.last_access),
                     remaining_s=max(0.0, session.deadline - now),
                     returncode=session.process.returncode,
-                    owner_session_key=session.owner_session_key,
                 )
                 for session_id, session in sorted(self._sessions.items())
-                if not owner_session_key
-                or not session.owner_session_key
-                or session.owner_session_key == owner_session_key
             ]
 
     async def _cleanup_locked(self) -> None:
@@ -494,7 +477,6 @@ class WriteStdinTool(Tool):
                 terminate=terminate,
                 yield_time_ms=clamp_session_int(yield_time_ms, DEFAULT_YIELD_MS, 0, MAX_YIELD_MS),
                 max_output_chars=output_limit,
-                owner_session_key=current_request_session_key(),
             )
             return format_session_poll(session_id, poll)
         except KeyError:
@@ -528,7 +510,6 @@ class WriteStdinTool(Tool):
                 terminate=terminate if first else False,
                 yield_time_ms=step_ms,
                 max_output_chars=max_output_chars,
-                owner_session_key=current_request_session_key(),
             )
             first = False
             if poll.output:
@@ -592,9 +573,7 @@ class ListExecSessionsTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         try:
-            sessions = await self._manager.list(
-                owner_session_key=current_request_session_key(),
-            )
+            sessions = await self._manager.list()
             if not sessions:
                 return "No active exec sessions."
             lines = []
