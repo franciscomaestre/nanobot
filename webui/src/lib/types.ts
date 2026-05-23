@@ -122,7 +122,6 @@ export interface UIFileEdit {
   deleted: number;
   approximate?: boolean;
   status: "editing" | "done" | "error";
-  operation?: "edit" | "delete" | string;
   binary?: boolean;
   error?: string;
   pending?: boolean;
@@ -140,36 +139,6 @@ export interface ChatSummary {
   preview: string;
   /** Unix epoch seconds when this session currently has a turn in flight. */
   runStartedAt?: number | null;
-  workspaceScope?: WorkspaceScopePayload | null;
-}
-
-export type WorkspaceAccessMode = "restricted" | "full";
-export type WebuiDefaultAccessMode = "default" | "full";
-
-export interface WorkspaceScopePayload {
-  project_path: string;
-  project_name?: string;
-  access_mode: WorkspaceAccessMode;
-  restrict_to_workspace?: boolean;
-  sandbox_status?: {
-    restrict_to_workspace: boolean;
-    workspace_root: string;
-    level: string;
-    enforced: boolean;
-    provider: string;
-    provider_label: string;
-    summary: string;
-  };
-}
-
-export interface WorkspacesPayload {
-  schema_version: number;
-  default_access_mode: WebuiDefaultAccessMode;
-  default_scope: WorkspaceScopePayload;
-  controls: {
-    can_change_project: boolean;
-    can_use_full_access: boolean;
-  };
 }
 
 export type SidebarDensity = "comfortable" | "compact";
@@ -188,7 +157,6 @@ export interface SidebarStatePayload {
   pinned_keys: string[];
   archived_keys: string[];
   title_overrides: Record<string, string>;
-  project_name_overrides: Record<string, string>;
   tags_by_key: Record<string, string[]>;
   collapsed_groups: Record<string, boolean>;
   view: SidebarViewState;
@@ -198,38 +166,11 @@ export interface SidebarStatePayload {
 export interface BootstrapResponse {
   token: string;
   ws_path: string;
-  ws_url?: string | null;
   expires_in: number;
   model_name?: string | null;
-  runtime_surface?: RuntimeSurface;
-  runtime_capabilities?: RuntimeCapabilities;
-}
-
-export type RuntimeSurface = "browser" | "native";
-export type RestartBehavior = "none" | "nextTurn" | "engineRestart" | "appRestart";
-export type SettingsApplyStatus =
-  | "idle"
-  | "pending"
-  | "applying"
-  | "restarting_engine"
-  | "requires_app_restart";
-
-export interface RuntimeCapabilities {
-  can_restart_engine: boolean;
-  can_pick_folder: boolean;
-  can_open_logs: boolean;
-  can_export_diagnostics: boolean;
 }
 
 export interface SettingsPayload {
-  surface?: RuntimeSurface;
-  runtime_surface?: RuntimeSurface;
-  runtime_capabilities?: RuntimeCapabilities;
-  apply_state?: {
-    status: SettingsApplyStatus;
-    sections: string[];
-  };
-  restart_behavior_by_section?: Record<string, RestartBehavior>;
   agent: {
     model: string;
     provider: string;
@@ -261,15 +202,11 @@ export interface SettingsPayload {
     name: string;
     label: string;
     configured: boolean;
-    auth_type?: "api_key" | "oauth";
     api_key_required?: boolean;
     api_key_hint?: string | null;
     api_base?: string | null;
     default_api_base?: string | null;
     api_type?: "auto" | "chat_completions" | "responses";
-    oauth_account?: string | null;
-    oauth_expires_at?: number | null;
-    oauth_login_supported?: boolean;
   }>;
   web_search: {
     provider: string;
@@ -308,7 +245,6 @@ export interface SettingsPayload {
       name: string;
       label: string;
       configured: boolean;
-      auth_type?: "api_key" | "oauth";
       api_key_hint?: string | null;
       api_base?: string | null;
       default_api_base?: string | null;
@@ -334,80 +270,14 @@ export interface SettingsPayload {
   };
   advanced: {
     restrict_to_workspace: boolean;
-    workspace_sandbox?: {
-      restrict_to_workspace: boolean;
-      workspace_root: string;
-      level: "off" | "application" | "system" | string;
-      enforced: boolean;
-      provider: string;
-      provider_label: string;
-      summary: string;
-    };
     ssrf_whitelist_count: number;
-    webui_allow_local_service_access: boolean;
-    allow_local_preview_access?: boolean;
-    webui_default_access_mode: WebuiDefaultAccessMode;
-    private_service_protection_enabled: boolean;
     mcp_server_count: number;
     exec_enabled: boolean;
     exec_sandbox?: string | null;
     exec_path_append_set: boolean;
   };
   requires_restart: boolean;
-  restart_required_sections?: Array<"runtime" | "browser" | "image">;
-}
-
-export interface AppPackageRef {
-  manager: string;
-  name?: string;
-}
-
-export interface AppCapability {
-  type: "cli" | "mcp" | "skill" | string;
-  entry_point?: string;
-  package?: AppPackageRef;
-  path?: string;
-  transport?: string;
-  command?: string;
-  args?: string[];
-  url?: string;
-  fields?: Array<{
-    name: string;
-    target?: string;
-    required?: boolean;
-    secret?: boolean;
-    env_var?: string | null;
-  }>;
-}
-
-export interface AppPlan {
-  supported: boolean;
-  strategy?: string;
-  managed_paths?: string[];
-  verification?: string[];
-}
-
-export interface AppTrust {
-  registry: string;
-  level: string;
-  review_status: string;
-}
-
-export interface AppManifest {
-  schema: "agent-app.v1" | string;
-  id: string;
-  display_name: string;
-  version?: string;
-  description: string;
-  category: string;
-  source: string;
-  logo_url?: string | null;
-  brand_color?: string | null;
-  docs_url?: string | null;
-  capabilities: AppCapability[];
-  install: AppPlan;
-  remove: AppPlan;
-  trust: AppTrust;
+  restart_required_sections?: Array<"runtime" | "web" | "image">;
 }
 
 export interface CliAppInfo {
@@ -425,7 +295,6 @@ export interface CliAppInfo {
   logo_url?: string | null;
   brand_color?: string | null;
   skill_installed: boolean;
-  manifest?: AppManifest;
 }
 
 export interface CliAppsPayload {
@@ -435,12 +304,7 @@ export interface CliAppsPayload {
   last_action?: {
     ok: boolean;
     message: string;
-    installed?: boolean;
-    removed?: boolean;
     output?: string | null;
-    still_available?: boolean;
-    verification?: string[];
-    verification_failed?: string[];
   };
 }
 
@@ -478,7 +342,6 @@ export interface McpPresetInfo {
   error?: string | null;
   enabled_tools?: string[];
   source?: "preset" | "custom" | string;
-  manifest?: AppManifest;
 }
 
 export interface McpPresetsPayload {
@@ -501,11 +364,6 @@ export interface McpPresetsPayload {
   last_action?: {
     ok: boolean;
     message: string;
-    installed?: boolean;
-    removed?: boolean;
-    managed_paths_removed?: string[];
-    verification?: string[];
-    verification_failed?: string[];
     tool_count?: number;
     tool_names?: string[];
     checked_at?: string | null;
@@ -530,13 +388,6 @@ export interface ModelConfigurationCreate {
   model: string;
 }
 
-export interface ModelConfigurationUpdate {
-  name: string;
-  label?: string;
-  provider?: string;
-  model?: string;
-}
-
 export interface ProviderSettingsUpdate {
   provider: string;
   apiKey?: string;
@@ -551,11 +402,6 @@ export interface WebSearchSettingsUpdate {
   maxResults?: number;
   timeout?: number;
   useJinaReader?: boolean;
-}
-
-export interface NetworkSafetySettingsUpdate {
-  webuiAllowLocalServiceAccess: boolean;
-  webuiDefaultAccessMode: WebuiDefaultAccessMode;
 }
 
 export interface ImageGenerationSettingsUpdate {
@@ -655,13 +501,8 @@ export type InboundEvent =
       chat_id: string;
       goal_state: GoalStateWsPayload;
     }
-  | {
-      event: "session_updated";
-      chat_id: string;
-      scope?: "metadata" | "thread" | string;
-      workspace_scope?: WorkspaceScopePayload;
-    }
-  | { event: "error"; chat_id?: string; detail?: string; reason?: string };
+  | { event: "session_updated"; chat_id: string; scope?: "metadata" | "thread" | string }
+  | { event: "error"; chat_id?: string; detail?: string };
 
 /** Base64-encoded image attached to an outbound ``message`` envelope.
  *
@@ -707,13 +548,11 @@ export interface WebuiThreadPersistedPayload {
   sessionKey?: string;
   savedAt?: string;
   messages: UIMessage[];
-  workspace_scope?: WorkspaceScopePayload;
 }
 
 export type Outbound =
-  | { type: "new_chat"; workspace_scope?: WorkspaceScopePayload }
+  | { type: "new_chat" }
   | { type: "attach"; chat_id: string }
-  | { type: "set_workspace_scope"; chat_id: string; workspace_scope: WorkspaceScopePayload }
   | {
       type: "message";
       chat_id: string;
@@ -722,7 +561,6 @@ export type Outbound =
       image_generation?: OutboundImageGeneration;
       cli_apps?: OutboundCliAppMention[];
       mcp_presets?: OutboundMcpPresetMention[];
-      workspace_scope?: WorkspaceScopePayload;
       /** Marks messages sent by the embedded WebUI, without changing the
        * generic websocket protocol for other clients. */
       webui?: true;
