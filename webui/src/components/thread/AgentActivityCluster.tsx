@@ -173,8 +173,6 @@ interface AgentActivityClusterProps {
   /** True while the session turn is still running (drives “Working…” copy + header sheen). */
   isTurnStreaming: boolean;
   hasBodyBelow: boolean;
-  /** Persisted end-to-end turn latency from the assistant answer, used for history replay. */
-  turnLatencyMs?: number;
   cliApps?: CliAppInfo[];
   mcpPresets?: McpPresetInfo[];
 }
@@ -187,7 +185,6 @@ export function AgentActivityCluster({
   messages,
   isTurnStreaming,
   hasBodyBelow,
-  turnLatencyMs,
   cliApps = [],
   mcpPresets = [],
 }: AgentActivityClusterProps) {
@@ -228,32 +225,24 @@ export function AgentActivityCluster({
 
   const [userToggledOuter, setUserToggledOuter] = useState(false);
   const [outerOpenLocal, setOuterOpenLocal] = useState(false);
-  const [completionHoldOpen, setCompletionHoldOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const activityScrollRef = useRef<HTMLDivElement>(null);
   const activityContentRef = useRef<HTMLDivElement>(null);
   const autoFollowActivityRef = useRef(true);
   const scrollFrameRef = useRef<number | null>(null);
-  const wasTurnStreamingRef = useRef(isTurnStreaming);
-  const wasTurnStreaming = wasTurnStreamingRef.current;
-  /** Live work stays open; completed work briefly shows the done state, then tucks away. */
-  const outerExpanded = userToggledOuter
-    ? outerOpenLocal
-    : isTurnStreaming || completionHoldOpen || (wasTurnStreaming && !isTurnStreaming);
+  /** Live work and the trace directly attached to an answer read like a visible trail. */
+  const outerExpanded = userToggledOuter ? outerOpenLocal : isTurnStreaming || hasBodyBelow;
 
   const hasLiveEditingFiles = isTurnStreaming && hasEditingFiles;
   const singleFilePath = fileCount === 1 ? primaryFilePath : undefined;
   const singleFileTooltipPath = fileCount === 1 ? primaryFileTooltipPath : undefined;
   const hasVisibleActivity = reasoningSteps > 0 || toolCalls > 0 || cliCount > 0 || mcpCount > 0 || fileCount > 0;
-  const durationMs = activityDurationMs(messages, isTurnStreaming, now, turnLatencyMs);
-  const activityDuration = formatActivityDuration(durationMs);
+  const activityDuration = formatActivityDuration(activityDurationMs(messages, isTurnStreaming, now));
   const thoughtLabel = isTurnStreaming
     ? t("message.activityThinkingFor", {
         duration: activityDuration,
         defaultValue: "Thinking for {{duration}}",
       })
-    : durationMs <= 0
-      ? t("message.activityThought", { defaultValue: "Thought" })
     : t("message.activityThoughtFor", {
         duration: activityDuration,
         defaultValue: "Thought for {{duration}}",
@@ -388,19 +377,6 @@ export function AgentActivityCluster({
     return () => window.clearInterval(interval);
   }, [isTurnStreaming]);
 
-  useEffect(() => {
-    const wasStreaming = wasTurnStreamingRef.current;
-    wasTurnStreamingRef.current = isTurnStreaming;
-    if (isTurnStreaming) {
-      setCompletionHoldOpen(false);
-      return undefined;
-    }
-    if (!wasStreaming || userToggledOuter) return undefined;
-    setCompletionHoldOpen(true);
-    const timeout = window.setTimeout(() => setCompletionHoldOpen(false), 900);
-    return () => window.clearTimeout(timeout);
-  }, [isTurnStreaming, userToggledOuter]);
-
   const onActivityScroll = useCallback(() => {
     const el = activityScrollRef.current;
     if (!el) return;
@@ -506,15 +482,7 @@ function shortFileName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 
-function activityDurationMs(
-  messages: UIMessage[],
-  active: boolean,
-  now: number,
-  completedLatencyMs?: number,
-): number {
-  if (!active && Number.isFinite(completedLatencyMs) && completedLatencyMs! >= 0) {
-    return Math.round(completedLatencyMs!);
-  }
+function activityDurationMs(messages: UIMessage[], active: boolean, now: number): number {
   const timestamps = messages
     .map((message) => message.createdAt)
     .filter((value) => Number.isFinite(value));
@@ -527,7 +495,7 @@ function activityDurationMs(
 }
 
 function formatActivityDuration(ms: number): string {
-  const seconds = ms > 0 && ms < 1000 ? 1 : Math.max(0, Math.round(ms / 1000));
+  const seconds = Math.max(0, Math.round(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
@@ -1808,10 +1776,7 @@ function FileEditRow({ edit }: { edit: FileEditSummary }) {
 
 function DiffPair({ added, deleted }: { added: number; deleted: number }) {
   return (
-    <span
-      className="inline-flex shrink-0 items-baseline gap-1.5 leading-[inherit] tabular-nums"
-      data-testid="activity-diff-pair"
-    >
+    <span className="inline-flex shrink-0 translate-y-[0.055em] items-center gap-1.5 tabular-nums">
       <DiffValue
         sign="+"
         value={added}
@@ -1829,11 +1794,8 @@ function DiffPair({ added, deleted }: { added: number; deleted: number }) {
 function DiffValue({ sign, value, className }: { sign: string; value: number; className: string }) {
   const safeValue = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
   return (
-    <span
-      className={cn("inline-flex items-baseline leading-[inherit]", className)}
-      aria-label={`${sign}${safeValue}`}
-    >
-      <span className="inline-flex items-baseline leading-none" aria-hidden>
+    <span className={cn("inline-flex", className)} aria-label={`${sign}${safeValue}`}>
+      <span className="inline-flex" aria-hidden>
         {sign}
         <AnimatedNumber value={safeValue} />
       </span>
@@ -1887,7 +1849,7 @@ function AnimatedNumber({ value }: { value: number }) {
 function RollingNumber({ value }: { value: number }) {
   const digits = String(value).split("");
   return (
-    <span className="inline-flex items-baseline leading-none" aria-hidden>
+    <span className="inline-flex h-[1em] overflow-hidden align-[-0.13em]" aria-hidden>
       {digits.map((digit, index) => (
         <RollingDigit
           key={`${digits.length}-${index}`}
@@ -1901,10 +1863,9 @@ function RollingNumber({ value }: { value: number }) {
 function RollingDigit({ digit }: { digit: number }) {
   const safeDigit = Number.isFinite(digit) ? Math.min(9, Math.max(0, digit)) : 0;
   return (
-    <span className="relative inline-block h-[1em] w-[0.62em] overflow-hidden align-baseline leading-none">
-      <span className="invisible block h-[1em] leading-none">0</span>
+    <span className="relative inline-block h-[1em] w-[0.62em] overflow-hidden">
       <span
-        className="absolute inset-x-0 top-0 flex flex-col transition-transform duration-200 ease-out will-change-transform"
+        className="flex flex-col transition-transform duration-200 ease-out will-change-transform"
         style={{ transform: `translateY(-${safeDigit}em)` }}
       >
         {Array.from({ length: 10 }, (_, n) => (

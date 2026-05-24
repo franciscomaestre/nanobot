@@ -21,7 +21,6 @@ import {
   Activity,
   ArrowUp,
   BookOpen,
-  Brain,
   Check,
   ChevronDown,
   ChevronUp,
@@ -31,7 +30,6 @@ import {
   Loader2,
   Plus,
   RotateCw,
-  Shield,
   Sparkles,
   Square,
   SquarePen,
@@ -100,11 +98,9 @@ interface ThreadComposerProps {
 const COMMAND_ICONS: Record<string, LucideIcon> = {
   activity: Activity,
   "book-open": BookOpen,
-  brain: Brain,
   "circle-help": CircleHelp,
   history: History,
   "rotate-cw": RotateCw,
-  shield: Shield,
   sparkles: Sparkles,
   square: Square,
   "square-pen": SquarePen,
@@ -117,9 +113,7 @@ const IMAGE_ASPECT_RATIOS: ImageAspectRatio[] = ["auto", "1:1", "3:4", "9:16", "
 const SLASH_PALETTE_GAP_PX = 8;
 const SLASH_PALETTE_MAX_HEIGHT_PX = 288;
 const SLASH_PALETTE_MIN_HEIGHT_PX = 144;
-const SLASH_PALETTE_CHROME_PX = 12;
-const SLASH_RECENTS_STORAGE_KEY = "nanobot.webui.slashCommandRecents";
-const SLASH_RECENTS_LIMIT = 5;
+const SLASH_PALETTE_CHROME_PX = 40;
 
 type SlashPalettePlacement = "above" | "below";
 
@@ -138,39 +132,8 @@ type MentionCandidate =
   | { kind: "cli"; name: string; app: CliAppInfo }
   | { kind: "mcp"; name: string; preset: McpPresetInfo };
 
-interface SlashPaletteCommand extends SlashCommand {
-  detail: string;
-  badge?: string;
-  recent: boolean;
-}
-
 function slashCommandI18nKey(command: string): string {
   return command.replace(/^\//, "").replace(/-/g, "_");
-}
-
-function readSlashRecents(): string[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(SLASH_RECENTS_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === "string").slice(0, SLASH_RECENTS_LIMIT)
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function storeSlashRecents(commands: string[]): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(
-      SLASH_RECENTS_STORAGE_KEY,
-      JSON.stringify(commands.slice(0, SLASH_RECENTS_LIMIT)),
-    );
-  } catch {
-    // localStorage may be unavailable in private contexts; command insertion still works.
-  }
 }
 
 function scrollNearestOverflowParent(target: EventTarget | null, deltaY: number) {
@@ -487,7 +450,6 @@ export function ThreadComposer({
   const [uncontrolledImageMode, setUncontrolledImageMode] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState<ImageAspectRatio>("auto");
   const [aspectMenuOpen, setAspectMenuOpen] = useState(false);
-  const [recentSlashCommands, setRecentSlashCommands] = useState<string[]>(() => readSlashRecents());
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -572,86 +534,26 @@ export function ThreadComposer({
     return commandToken.toLowerCase();
   }, [disabled, slashMenuDismissed, value]);
 
-  const visibleSlashCommands = useMemo(() => {
-    if (!(isStreaming && onStop)) return slashCommands;
-    if (slashCommands.some((command) => command.command === "/stop")) return slashCommands;
-    return [
-      {
-        command: "/stop",
-        title: "Stop current task",
-        description: "Cancel the active agent turn for this chat.",
-        icon: "square",
-      },
-      ...slashCommands,
-    ];
-  }, [isStreaming, onStop, slashCommands]);
-
-  const filteredSlashCommands = useMemo<SlashPaletteCommand[]>(() => {
+  const filteredSlashCommands = useMemo(() => {
     if (slashQuery === null) return [];
-    const withDetails = visibleSlashCommands
+    return slashCommands
       .filter((command) => {
-        const commandKey = slashCommandI18nKey(command.command);
-        const title = t(`thread.composer.slash.commands.${commandKey}.title`, {
-          defaultValue: command.title,
-        });
-        const description = t(`thread.composer.slash.commands.${commandKey}.description`, {
-          defaultValue: command.description,
-        });
         const haystack = [
           command.command,
           command.title,
           command.description,
           command.argHint ?? "",
-          title,
-          description,
+          t(`thread.composer.slash.commands.${slashCommandI18nKey(command.command)}.title`, {
+            defaultValue: "",
+          }),
+          t(`thread.composer.slash.commands.${slashCommandI18nKey(command.command)}.description`, {
+            defaultValue: "",
+          }),
         ].join(" ").toLowerCase();
         return haystack.includes(slashQuery);
       })
-      .map((command) => {
-        const commandKey = slashCommandI18nKey(command.command);
-        const description = t(`thread.composer.slash.commands.${commandKey}.description`, {
-          defaultValue: command.description,
-        });
-        let detail = description;
-        let badge: string | undefined;
-        if (command.command === "/model" && modelLabel) {
-          detail = modelLabel;
-          badge = t("thread.composer.slash.badges.current");
-        } else if (command.command === "/goal") {
-          detail = goalState?.active
-            ? t("thread.composer.slash.details.goalActive")
-            : t("thread.composer.slash.details.goalReady");
-        } else if (command.command === "/stop" && isStreaming) {
-          detail = t("thread.composer.slash.details.stopRunning");
-        } else if (command.command === "/history") {
-          detail = t("thread.composer.slash.details.history");
-        }
-        return {
-          ...command,
-          detail,
-          badge,
-          recent: recentSlashCommands.includes(command.command),
-        };
-      })
-      .sort((a, b) => {
-        if (isStreaming) {
-          if (a.command === "/stop") return -1;
-          if (b.command === "/stop") return 1;
-        }
-        if (slashQuery !== "") return 0;
-        const aRecent = recentSlashCommands.indexOf(a.command);
-        const bRecent = recentSlashCommands.indexOf(b.command);
-        if (aRecent !== -1 || bRecent !== -1) {
-          if (aRecent === -1) return 1;
-          if (bRecent === -1) return -1;
-          return aRecent - bRecent;
-        }
-        return 0;
-      });
-
-    return withDetails
       .slice(0, 8);
-  }, [goalState?.active, isStreaming, modelLabel, recentSlashCommands, slashQuery, t, visibleSlashCommands]);
+  }, [slashCommands, slashQuery, t]);
 
   const showSlashMenu = filteredSlashCommands.length > 0;
   const cliAppMention = useMemo<CliAppMentionQuery | null>(() => {
@@ -844,30 +746,13 @@ export function ThreadComposer({
 
   const chooseSlashCommand = useCallback(
     (command: SlashCommand) => {
-      const nextRecents = [
-        command.command,
-        ...recentSlashCommands.filter((item) => item !== command.command),
-      ].slice(0, SLASH_RECENTS_LIMIT);
-      setRecentSlashCommands(nextRecents);
-      storeSlashRecents(nextRecents);
-
-      if (command.command === "/stop" && isStreaming && onStop) {
-        onStop();
-        setValue("");
-        setSlashMenuDismissed(true);
-        setCliAppMenuDismissed(false);
-        setInlineError(null);
-        resizeTextarea();
-        return;
-      }
-
       setValue(command.argHint ? `${command.command} ` : command.command);
       setSlashMenuDismissed(true);
       setCliAppMenuDismissed(false);
       setInlineError(null);
       resizeTextarea();
     },
-    [isStreaming, onStop, recentSlashCommands, resizeTextarea],
+    [resizeTextarea],
   );
 
   const chooseMentionCandidate = useCallback(
@@ -1422,12 +1307,12 @@ function ComposerCliMentionOverlay({
   );
 }
 interface SlashCommandPaletteProps {
-  commands: SlashPaletteCommand[];
+  commands: SlashCommand[];
   selectedIndex: number;
   layout: SlashPaletteLayout;
   isHero: boolean;
   onHover: (index: number) => void;
-  onChoose: (command: SlashPaletteCommand) => void;
+  onChoose: (command: SlashCommand) => void;
 }
 
 interface CliAppMentionPaletteProps {
@@ -1647,11 +1532,14 @@ function SlashCommandPalette({
       className={cn(
         "absolute left-1/2 z-30 w-[calc(100%-0.5rem)] -translate-x-1/2 overflow-hidden rounded-[18px] border",
         layout.placement === "above" ? "bottom-full mb-2" : "top-full mt-2",
-        "border-border/65 bg-popover p-1.5 text-popover-foreground shadow-[0_18px_55px_rgba(15,23,42,0.16)]",
+        "border-border/65 bg-popover p-1.5 text-popover-foreground shadow-[0_18px_55px_rgba(15,23,42,0.18)]",
         "dark:border-white/10 dark:shadow-[0_22px_55px_rgba(0,0,0,0.45)]",
         isHero ? "max-w-[58rem]" : "max-w-[49.5rem]",
       )}
     >
+      <div className="px-2 pb-1 pt-1 text-[11px] font-medium tracking-[0.08em] text-muted-foreground/70">
+        {t("thread.composer.slash.label")}
+      </div>
       <div className="overflow-y-auto pr-0.5" style={{ maxHeight: listMaxHeight }}>
         {commands.map((command, index) => {
           const Icon = COMMAND_ICONS[command.icon] ?? CircleHelp;
@@ -1675,41 +1563,48 @@ function SlashCommandPalette({
                 onChoose(command);
               }}
               className={cn(
-                "flex min-h-[44px] w-full items-center gap-3 rounded-[13px] px-3 py-2 text-left transition-colors",
+                "flex w-full items-center gap-3 rounded-[13px] px-3 py-2.5 text-left transition-colors",
                 selected
-                  ? "bg-foreground/[0.065] text-foreground dark:bg-white/[0.09]"
-                  : "text-foreground/86 hover:bg-foreground/[0.045] dark:hover:bg-white/[0.065]",
+                  ? "bg-primary/10 text-foreground"
+                  : "text-foreground/86 hover:bg-accent/55",
               )}
             >
               <span
                 className={cn(
-                  "flex h-7 w-7 shrink-0 items-center justify-center text-muted-foreground transition-colors",
-                  selected && "text-foreground",
+                  "flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] border",
+                  selected
+                    ? "border-primary/25 bg-primary/12 text-primary"
+                    : "border-border/65 bg-muted/45 text-muted-foreground",
                 )}
               >
                 <Icon className="h-4 w-4" />
               </span>
-              <span className="flex min-w-0 flex-1 items-baseline gap-2">
-                <span className="min-w-0 truncate text-[13.5px] font-semibold tracking-normal text-foreground">
-                  {title}
-                </span>
-                <span className="min-w-0 truncate text-[13px] text-muted-foreground">
-                  {command.detail || description}
-                </span>
-              </span>
-              <span className="ml-2 flex shrink-0 items-center gap-1.5">
-                {command.badge || command.recent ? (
-                  <span className="hidden rounded-full bg-foreground/[0.055] px-2 py-1 text-[11px] font-medium text-muted-foreground sm:inline-flex">
-                    {command.badge ?? t("thread.composer.slash.badges.recent")}
+              <span className="min-w-0 flex-1">
+                <span className="flex min-w-0 items-baseline gap-2">
+                  <span className="font-mono text-[13px] font-semibold text-foreground">
+                    {command.command}
                   </span>
-                ) : null}
-                <span className="font-mono text-[12px] text-muted-foreground/60">
-                  {command.argHint ? `${command.command} ${command.argHint}` : command.command}
+                  {command.argHint ? (
+                    <span className="font-mono text-[12px] text-muted-foreground">
+                      {command.argHint}
+                    </span>
+                  ) : null}
+                  <span className="truncate text-[13px] font-medium">
+                    {title}
+                  </span>
+                </span>
+                <span className="mt-0.5 block truncate text-[12px] text-muted-foreground">
+                  {description}
                 </span>
               </span>
             </button>
           );
         })}
+      </div>
+      <div className="flex items-center gap-2 px-2 pt-1.5 text-[10.5px] text-muted-foreground/70">
+        <span>{t("thread.composer.slash.navigateHint")}</span>
+        <span>{t("thread.composer.slash.selectHint")}</span>
+        <span>{t("thread.composer.slash.closeHint")}</span>
       </div>
     </div>
   );

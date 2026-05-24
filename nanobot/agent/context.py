@@ -3,6 +3,8 @@
 import base64
 import mimetypes
 import platform
+from contextlib import suppress
+from importlib.resources import files as pkg_files
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -10,13 +12,12 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.agent.tools import mcp as mcp_tools
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.apps.cli import utils as cli_app_utils
 from nanobot.bus.events import InboundMessage
+from nanobot.cli_apps import utils as cli_app_utils
 from nanobot.session.goal_state import goal_state_runtime_lines
 from nanobot.utils.helpers import (
     current_time_str,
     detect_image_mime,
-    load_bundled_template,
     truncate_text,
 )
 from nanobot.utils.prompt_templates import render_template
@@ -68,13 +69,11 @@ class ContextBuilder:
         skill_names: list[str] | None = None,
         channel: str | None = None,
         session_summary: str | None = None,
-        workspace: Path | None = None,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
-        root = workspace or self.workspace
-        parts = [self._get_identity(channel=channel, workspace=root)]
+        parts = [self._get_identity(channel=channel)]
 
-        bootstrap = self._load_bootstrap_files(root)
+        bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
 
@@ -108,10 +107,9 @@ class ContextBuilder:
 
         return "\n\n---\n\n".join(parts)
 
-    def _get_identity(self, channel: str | None = None, workspace: Path | None = None) -> str:
+    def _get_identity(self, channel: str | None = None) -> str:
         """Get the core identity section."""
-        root = workspace or self.workspace
-        workspace_path = str(root.expanduser().resolve())
+        workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
@@ -155,13 +153,12 @@ class ContextBuilder:
 
         return _to_blocks(left) + _to_blocks(right)
 
-    def _load_bootstrap_files(self, workspace: Path | None = None) -> str:
+    def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
         parts = []
-        root = workspace or self.workspace
 
         for filename in self.BOOTSTRAP_FILES:
-            file_path = root / filename
+            file_path = self.workspace / filename
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
                 parts.append(f"## {filename}\n\n{content}")
@@ -171,9 +168,10 @@ class ContextBuilder:
     @staticmethod
     def _is_template_content(content: str, template_path: str) -> bool:
         """Check if *content* is identical to the bundled template (user hasn't customized it)."""
-        tpl = load_bundled_template(template_path)
-        if tpl is not None:
-            return content.strip() == tpl.strip()
+        with suppress(Exception):
+            tpl = pkg_files("nanobot") / "templates" / template_path
+            if tpl.is_file():
+                return content.strip() == tpl.read_text(encoding="utf-8").strip()
         return False
 
     def build_messages(
@@ -189,18 +187,11 @@ class ContextBuilder:
         session_summary: str | None = None,
         session_metadata: Mapping[str, Any] | None = None,
         current_runtime_lines: Sequence[str] | None = None,
-        workspace: Path | None = None,
-        runtime_state: Any | None = None,
-        inbound_message: Any | None = None,
-        skip_runtime_lines: bool = False,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
-        root = workspace or self.workspace
         extra = [
             *goal_state_runtime_lines(session_metadata),
         ]
-        if runtime_state is not None and inbound_message is not None:
-            extra.extend(runtime_lines(runtime_state, inbound_message, root, skip=skip_runtime_lines))
         if current_runtime_lines:
             extra.extend(line for line in current_runtime_lines if line)
         runtime_ctx = self._build_runtime_context(
@@ -221,15 +212,7 @@ class ContextBuilder:
         else:
             merged = user_content + [{"type": "text", "text": runtime_ctx}]
         messages = [
-            {
-                "role": "system",
-                "content": self.build_system_prompt(
-                    skill_names,
-                    channel=channel,
-                    session_summary=session_summary,
-                    workspace=root,
-                ),
-            },
+            {"role": "system", "content": self.build_system_prompt(skill_names, channel=channel, session_summary=session_summary)},
             *history,
         ]
         if messages[-1].get("role") == current_role:

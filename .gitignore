@@ -100,3 +100,4 @@ tmp/
 temp/
 *.tmp
 exp/
+.playwright-mcp/
