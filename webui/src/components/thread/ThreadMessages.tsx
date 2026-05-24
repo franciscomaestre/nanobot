@@ -6,7 +6,7 @@ import {
   AgentActivityCluster,
   isAgentActivityMember,
 } from "@/components/thread/AgentActivityCluster";
-import type { UIMessage } from "@/lib/types";
+import type { CliAppInfo, McpPresetInfo, UIMessage } from "@/lib/types";
 
 interface ThreadMessagesProps {
   messages: UIMessage[];
@@ -14,6 +14,8 @@ interface ThreadMessagesProps {
   isStreaming?: boolean;
   hiddenMessageCount?: number;
   onLoadEarlier?: () => void;
+  cliApps?: CliAppInfo[];
+  mcpPresets?: McpPresetInfo[];
 }
 
 export type DisplayUnit =
@@ -57,7 +59,7 @@ export function buildDisplayUnits(messages: UIMessage[]): DisplayUnit[] {
         cluster.push(current);
         i += 1;
       }
-      pushActivityCluster(out, cluster);
+      out.push({ type: "cluster", messages: cluster });
       continue;
     }
     const previous = out[out.length - 1];
@@ -81,42 +83,6 @@ export function buildDisplayUnits(messages: UIMessage[]): DisplayUnit[] {
     i += 1;
   }
   return out;
-}
-
-function pushActivityCluster(out: DisplayUnit[], cluster: UIMessage[]) {
-  const previous = out[out.length - 1];
-  if (
-    previous?.type !== "single"
-    || !shouldPlaceLateActivityBeforeAssistant(out, previous.message)
-  ) {
-    out.push({ type: "cluster", messages: cluster });
-    return;
-  }
-
-  const beforeAssistant = out[out.length - 2];
-  if (beforeAssistant?.type === "cluster" && canMergeActivityClusters(beforeAssistant.messages, cluster)) {
-    beforeAssistant.messages.push(...cluster);
-    return;
-  }
-
-  out.splice(out.length - 1, 0, { type: "cluster", messages: cluster });
-}
-
-function shouldPlaceLateActivityBeforeAssistant(out: DisplayUnit[], message: UIMessage): boolean {
-  if (message.role !== "assistant" || message.kind === "trace") return false;
-  if (message.isStreaming) return true;
-  if (hasTurnLatency(message)) return true;
-
-  const beforeAssistant = out[out.length - 2];
-  return beforeAssistant?.type === "cluster";
-}
-
-function hasTurnLatency(message: UIMessage): boolean {
-  return (
-    typeof message.latencyMs === "number"
-    && Number.isFinite(message.latencyMs)
-    && message.latencyMs >= 0
-  );
 }
 
 function clusterSegmentId(messages: UIMessage[]): string | undefined {
@@ -149,19 +115,6 @@ function canFoldInlineReasoning(cluster: UIMessage[], message: UIMessage): boole
   return segmentId === message.activitySegmentId;
 }
 
-function canMergeActivityClusters(target: UIMessage[], incoming: UIMessage[]): boolean {
-  let segmentId = clusterSegmentId(target);
-  let includesFileEdits = clusterHasFileEdits(target);
-  for (const message of incoming) {
-    if (!canJoinActivityCluster(segmentId, includesFileEdits, message)) return false;
-    if (!segmentId && message.activitySegmentId) {
-      segmentId = message.activitySegmentId;
-    }
-    includesFileEdits = includesFileEdits || hasFileEdits(message);
-  }
-  return true;
-}
-
 function assistantHasInlineReasoning(message: UIMessage): boolean {
   return (
     message.role === "assistant"
@@ -181,6 +134,7 @@ function reasoningOnlyMessageFromAnswer(message: UIMessage): UIMessage {
     reasoningStreaming: message.reasoningStreaming,
     isStreaming: message.reasoningStreaming,
     activitySegmentId: message.activitySegmentId,
+    latencyMs: message.latencyMs,
   };
 }
 
@@ -213,6 +167,8 @@ export function ThreadMessages({
   isStreaming = false,
   hiddenMessageCount = 0,
   onLoadEarlier,
+  cliApps = [],
+  mcpPresets = [],
 }: ThreadMessagesProps) {
   const { t } = useTranslation();
   const units = useMemo(() => buildDisplayUnits(messages), [messages]);
@@ -249,6 +205,8 @@ export function ThreadMessages({
           unit.type === "cluster"
           && next?.type === "single"
           && next.message.role === "assistant";
+        const turnLatencyMs =
+          unit.type === "cluster" ? activityClusterTurnLatencyMs(unit.messages, next) : undefined;
 
         return (
           <div key={unitKey(unit, index)} className={marginTop}>
@@ -257,6 +215,9 @@ export function ThreadMessages({
                 messages={unit.messages}
                 isTurnStreaming={index === liveActivityClusterIndex}
                 hasBodyBelow={hasBodyBelow}
+                turnLatencyMs={turnLatencyMs}
+                cliApps={cliApps}
+                mcpPresets={mcpPresets}
               />
             ) : (
               <MessageBubble
@@ -266,6 +227,8 @@ export function ThreadMessages({
                     ? copyFlags[index]
                     : true
                 }
+                cliApps={cliApps}
+                mcpPresets={mcpPresets}
               />
             )}
           </div>
@@ -275,15 +238,31 @@ export function ThreadMessages({
   );
 }
 
-function currentActivityClusterIndex(units: DisplayUnit[]): number {
-  for (let i = units.length - 1; i >= 0; i -= 1) {
-    const unit = units[i];
-    if (unit.type === "cluster") return i;
-    if (unit.message.role === "assistant" && unit.message.isStreaming) continue;
-    if (unit.message.role === "user") break;
-    return -1;
+function activityClusterTurnLatencyMs(
+  messages: UIMessage[],
+  next: DisplayUnit | undefined,
+): number | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const latency = messages[i].latencyMs;
+    if (typeof latency === "number" && Number.isFinite(latency) && latency >= 0) {
+      return latency;
+    }
   }
-  return -1;
+  if (
+    next?.type === "single"
+    && next.message.role === "assistant"
+    && typeof next.message.latencyMs === "number"
+    && Number.isFinite(next.message.latencyMs)
+    && next.message.latencyMs >= 0
+  ) {
+    return next.message.latencyMs;
+  }
+  return undefined;
+}
+
+function currentActivityClusterIndex(units: DisplayUnit[]): number {
+  const last = units.length - 1;
+  return units[last]?.type === "cluster" ? last : -1;
 }
 
 function unitKey(unit: DisplayUnit, index: number): string {
