@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Menu, Moon, Sun } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { DeleteConfirm } from "@/components/DeleteConfirm";
 import { RenameChatDialog } from "@/components/RenameChatDialog";
@@ -24,21 +23,9 @@ import {
 import { deriveTitle } from "@/lib/format";
 import { NanobotClient } from "@/lib/nanobot-client";
 import { ClientProvider, useClient } from "@/providers/ClientProvider";
-import type {
-  ChatSummary,
-  RuntimeSurface,
-  SettingsPayload,
-  WorkspaceScopePayload,
-  WorkspacesPayload,
-} from "@/lib/types";
+import type { ChatSummary } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { fetchSettings, fetchWorkspaces } from "@/lib/api";
-import {
-  createRuntimeHost,
-  toRuntimeSurface,
-} from "@/lib/runtime";
-import { projectNameFromPath } from "@/lib/workspace";
 
 type BootState =
   | { status: "loading" }
@@ -50,7 +37,6 @@ type BootState =
       token: string;
       tokenExpiresAt: number;
       modelName: string | null;
-      runtimeSurface: RuntimeSurface;
     };
 
 const SIDEBAR_STORAGE_KEY = "nanobot-webui.sidebar";
@@ -163,67 +149,6 @@ function writeCompletedRunChatIds(chatIds: Set<string>): void {
   }
 }
 
-function normalizeWorkspaceScope(scope: WorkspaceScopePayload): WorkspaceScopePayload {
-  const accessMode = scope.access_mode === "restricted" ? "restricted" : "full";
-  return {
-    ...scope,
-    project_name: scope.project_name ?? projectNameFromPath(scope.project_path),
-    access_mode: accessMode,
-    restrict_to_workspace: accessMode === "restricted",
-  };
-}
-
-function HostChrome({
-  onToggleSidebar,
-  theme,
-  onToggleTheme,
-  showThemeButton = true,
-}: {
-  onToggleSidebar?: () => void;
-  theme: "light" | "dark";
-  onToggleTheme: () => void;
-  showThemeButton?: boolean;
-}) {
-  const { t } = useTranslation();
-
-  return (
-    <header className="host-drag-region pointer-events-none absolute inset-x-0 top-0 z-40 flex h-11 items-start justify-between bg-transparent px-3 pt-2 text-foreground/90">
-      <div className="flex min-w-[8rem] items-center">
-        {onToggleSidebar ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label={t("thread.header.toggleSidebar")}
-            onClick={onToggleSidebar}
-            className="host-no-drag pointer-events-auto ml-[88px] h-8 w-8 rounded-xl text-muted-foreground/85 hover:bg-accent/40 hover:text-foreground"
-          >
-            <Menu className="h-4 w-4" />
-          </Button>
-        ) : null}
-      </div>
-      {showThemeButton ? (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          aria-label={t("thread.header.toggleTheme")}
-          onClick={onToggleTheme}
-          className="host-no-drag pointer-events-auto h-8 w-8 rounded-full text-muted-foreground/85 hover:bg-accent/40 hover:text-foreground"
-        >
-          {theme === "dark" ? (
-            <Sun className="h-4 w-4" />
-          ) : (
-            <Moon className="h-4 w-4" />
-          )}
-        </Button>
-      ) : (
-        <div aria-hidden className="h-8 w-8" />
-      )}
-    </header>
-  );
-}
-
 export default function App() {
   const { t } = useTranslation();
   const [state, setState] = useState<BootState>({ status: "loading" });
@@ -238,20 +163,13 @@ export default function App() {
           const boot = await fetchBootstrap("", secret);
           if (cancelled) return;
           if (secret) saveSecret(secret);
-          const url = deriveWsUrl(boot.ws_path, boot.token, boot.ws_url);
-          const runtimeSurface = toRuntimeSurface(boot.runtime_surface);
-          const runtimeHost = createRuntimeHost(runtimeSurface, boot.runtime_capabilities);
+          const url = deriveWsUrl(boot.ws_path, boot.token);
           const client = new NanobotClient({
             url,
-            socketFactory: runtimeHost.socketFactory,
             onReauth: async () => {
               try {
                 const refreshed = await fetchBootstrap("", bootstrapSecretRef.current);
-                const refreshedUrl = deriveWsUrl(
-                  refreshed.ws_path,
-                  refreshed.token,
-                  refreshed.ws_url,
-                );
+                const refreshedUrl = deriveWsUrl(refreshed.ws_path, refreshed.token);
                 const tokenExpiresAt = bootstrapTokenExpiresAt(refreshed.expires_in);
                 setState((current) =>
                   current.status === "ready" && current.client === client
@@ -260,10 +178,6 @@ export default function App() {
                         token: refreshed.token,
                         tokenExpiresAt,
                         modelName: refreshed.model_name ?? current.modelName,
-                        runtimeSurface:
-                          refreshed.runtime_surface
-                            ? toRuntimeSurface(refreshed.runtime_surface)
-                            : current.runtimeSurface,
                       }
                     : current,
                 );
@@ -281,7 +195,6 @@ export default function App() {
             token: boot.token,
             tokenExpiresAt: bootstrapTokenExpiresAt(boot.expires_in),
             modelName: boot.model_name ?? null,
-            runtimeSurface,
           });
         } catch (e) {
           if (cancelled) return;
@@ -306,7 +219,7 @@ export default function App() {
     const timer = window.setTimeout(async () => {
       try {
         const boot = await fetchBootstrap("", bootstrapSecretRef.current);
-        const url = deriveWsUrl(boot.ws_path, boot.token, boot.ws_url);
+        const url = deriveWsUrl(boot.ws_path, boot.token);
         const tokenExpiresAt = bootstrapTokenExpiresAt(boot.expires_in);
         client.updateUrl(url);
         setState((current) =>
@@ -316,9 +229,6 @@ export default function App() {
                 token: boot.token,
                 tokenExpiresAt,
                 modelName: boot.model_name ?? current.modelName,
-                runtimeSurface: boot.runtime_surface
-                  ? toRuntimeSurface(boot.runtime_surface)
-                  : current.runtimeSurface,
               }
             : current,
         );
@@ -394,26 +304,20 @@ export default function App() {
       token={state.token}
       modelName={state.modelName}
     >
-      <Shell
-        runtimeSurface={state.runtimeSurface}
-        onModelNameChange={handleModelNameChange}
-        onLogout={handleLogout}
-      />
+      <Shell onModelNameChange={handleModelNameChange} onLogout={handleLogout} />
     </ClientProvider>
   );
 }
 
 function Shell({
-  runtimeSurface,
   onModelNameChange,
   onLogout,
 }: {
-  runtimeSurface: RuntimeSurface;
   onModelNameChange: (modelName: string | null) => void;
   onLogout: () => void;
 }) {
   const { t, i18n } = useTranslation();
-  const { client, token } = useClient();
+  const { client } = useClient();
   const { theme, toggle } = useTheme();
   const { sessions, loading, refresh, createChat, deleteChat } = useSessions();
   const { state: sidebarState, update: updateSidebarState } =
@@ -421,7 +325,7 @@ function Shell({
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [view, setView] = useState<ShellView>("chat");
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSectionKey>("overview");
-  const [hostSidebarOpen, setHostSidebarOpen] =
+  const [desktopSidebarOpen, setDesktopSidebarOpen] =
     useState<boolean>(readSidebarOpen);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
@@ -433,48 +337,23 @@ function Shell({
     key: string;
     label: string;
   } | null>(null);
-  const [pendingProjectRename, setPendingProjectRename] = useState<{
-    key: string;
-    label: string;
-  } | null>(null);
   const restartSawDisconnectRef = useRef(false);
   const [restartToast, setRestartToast] = useState<string | null>(null);
   const [isRestarting, setIsRestarting] = useState(false);
   const [runningChatIds, setRunningChatIds] = useState<Set<string>>(() => new Set());
   const [completedChatIds, setCompletedChatIds] = useState<Set<string>>(readCompletedRunChatIds);
-  const [workspaces, setWorkspaces] = useState<WorkspacesPayload | null>(null);
-  const [settingsSnapshot, setSettingsSnapshot] = useState<SettingsPayload | null>(null);
-  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
-  const [draftWorkspaceScope, setDraftWorkspaceScope] =
-    useState<WorkspaceScopePayload | null>(null);
-  const [workspaceOverrides, setWorkspaceOverrides] =
-    useState<Record<string, WorkspaceScopePayload>>({});
   const runningChatIdsRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchSettings(token)
-      .then((payload) => {
-        if (!cancelled) setSettingsSnapshot(payload);
-      })
-      .catch(() => {
-        if (!cancelled) setSettingsSnapshot(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [token]);
 
   useEffect(() => {
     try {
       window.localStorage.setItem(
         SIDEBAR_STORAGE_KEY,
-        hostSidebarOpen ? "1" : "0",
+        desktopSidebarOpen ? "1" : "0",
       );
     } catch {
       // ignore storage errors (private mode, etc.)
     }
-  }, [hostSidebarOpen]);
+  }, [desktopSidebarOpen]);
 
   useEffect(() => {
     writeCompletedRunChatIds(completedChatIds);
@@ -486,36 +365,6 @@ function Shell({
   }, [sessions, activeKey]);
   const runningChatIdList = useMemo(() => Array.from(runningChatIds), [runningChatIds]);
   const completedChatIdList = useMemo(() => Array.from(completedChatIds), [completedChatIds]);
-  const activeChatId = activeSession?.chatId ?? null;
-  const activeWorkspaceScope = useMemo<WorkspaceScopePayload | null>(() => {
-    if (activeChatId && workspaceOverrides[activeChatId]) {
-      return workspaceOverrides[activeChatId];
-    }
-    if (activeSession?.workspaceScope) {
-      return activeSession.workspaceScope;
-    }
-    return draftWorkspaceScope ?? workspaces?.default_scope ?? null;
-  }, [
-    activeChatId,
-    activeSession?.workspaceScope,
-    draftWorkspaceScope,
-    workspaceOverrides,
-    workspaces?.default_scope,
-  ]);
-  const activeChatRunning = activeChatId ? runningChatIds.has(activeChatId) : false;
-
-  const refreshWorkspaces = useCallback(async () => {
-    try {
-      const payload = await fetchWorkspaces(token);
-      setWorkspaces(payload);
-    } catch {
-      setWorkspaces(null);
-    }
-  }, [token]);
-
-  useEffect(() => {
-    void refreshWorkspaces();
-  }, [refreshWorkspaces]);
 
   useEffect(() => {
     if (loading) return;
@@ -526,33 +375,7 @@ function Shell({
       );
       return next.size === current.size ? current : next;
     });
-    setWorkspaceOverrides((current) => {
-      const entries = Object.entries(current).filter(([chatId]) => knownChatIds.has(chatId));
-      return entries.length === Object.keys(current).length ? current : Object.fromEntries(entries);
-    });
   }, [loading, sessions]);
-
-  useEffect(() => {
-    return client.onSessionUpdate((_chatId, _scope, workspaceScope) => {
-      if (!workspaceScope) return;
-      const next = normalizeWorkspaceScope(workspaceScope);
-      setWorkspaceOverrides((current) => ({
-        ...current,
-        [_chatId]: next,
-      }));
-      setDraftWorkspaceScope(next);
-      setWorkspaceError(null);
-      void refreshWorkspaces();
-    });
-  }, [client, refreshWorkspaces]);
-
-  useEffect(() => {
-    return client.onError((error) => {
-      if (error.kind !== "workspace_scope_rejected") return;
-      setWorkspaceError(t("errors.workspaceScopeRejected.body"));
-      void refreshWorkspaces();
-    });
-  }, [client, refreshWorkspaces, t]);
 
   useEffect(() => {
     if (loading) return;
@@ -585,12 +408,12 @@ function Shell({
     });
   }, [client, loading, sessions]);
 
-  const closeHostSidebar = useCallback(() => {
-    setHostSidebarOpen(false);
+  const closeDesktopSidebar = useCallback(() => {
+    setDesktopSidebarOpen(false);
   }, []);
 
-  const openHostSidebar = useCallback(() => {
-    setHostSidebarOpen(true);
+  const openDesktopSidebar = useCallback(() => {
+    setDesktopSidebarOpen(true);
   }, []);
 
   const closeMobileSidebar = useCallback(() => {
@@ -598,88 +421,38 @@ function Shell({
   }, []);
 
   const toggleSidebar = useCallback(() => {
-    const isNativeHost =
+    const isDesktop =
       typeof window !== "undefined" &&
       window.matchMedia("(min-width: 1024px)").matches;
-    if (isNativeHost) {
-      setHostSidebarOpen((v) => !v);
+    if (isDesktop) {
+      setDesktopSidebarOpen((v) => !v);
     } else {
       setMobileSidebarOpen((v) => !v);
     }
   }, []);
 
-  const applyWorkspaceScope = useCallback(
-    (scope: WorkspaceScopePayload) => {
-      const next = normalizeWorkspaceScope(scope);
-      setWorkspaceError(null);
-      if (activeChatId) {
-        if (!activeChatRunning) {
-          client.setWorkspaceScope(activeChatId, next);
-        }
-        return;
-      }
-      setDraftWorkspaceScope(next);
-    },
-    [activeChatId, activeChatRunning, client],
-  );
-
-  const onCreateChat = useCallback(async (workspaceScope?: WorkspaceScopePayload | null) => {
+  const onCreateChat = useCallback(async () => {
     try {
-      const scope = workspaceScope ?? activeWorkspaceScope;
-      const chatId = await createChat(scope);
+      const chatId = await createChat();
       setActiveKey(`websocket:${chatId}`);
       setView("chat");
       setMobileSidebarOpen(false);
-      if (scope) {
-        setWorkspaceOverrides((current) => ({
-          ...current,
-          [chatId]: normalizeWorkspaceScope(scope),
-        }));
-      }
       return chatId;
     } catch (e) {
       console.error("Failed to create chat", e);
-      if (e instanceof Error && e.message.startsWith("workspace_scope_rejected:")) {
-        setWorkspaceError(t("errors.workspaceScopeRejected.body"));
-      }
       return null;
     }
-  }, [activeWorkspaceScope, createChat, t]);
+  }, [createChat]);
 
   const onNewChat = useCallback(() => {
     setActiveKey(null);
-    setDraftWorkspaceScope(null);
-    setWorkspaceError(null);
     setView("chat");
     setMobileSidebarOpen(false);
   }, []);
 
-  const onNewChatInProject = useCallback(
-    (projectPath: string, projectName: string) => {
-      const base = workspaces?.default_scope ?? activeWorkspaceScope;
-      const trimmed = projectPath.trim();
-      if (!base || !trimmed) {
-        onNewChat();
-        return;
-      }
-      setActiveKey(null);
-      setDraftWorkspaceScope(normalizeWorkspaceScope({
-        project_path: trimmed,
-        project_name: projectName || projectNameFromPath(trimmed),
-        access_mode: base.access_mode,
-        restrict_to_workspace: base.access_mode === "restricted",
-      }));
-      setWorkspaceError(null);
-      setView("chat");
-      setMobileSidebarOpen(false);
-    },
-    [activeWorkspaceScope, onNewChat, workspaces?.default_scope],
-  );
-
   const onSelectChat = useCallback(
     (key: string) => {
-      const selected = sessions.find((session) => session.key === key);
-      const selectedChatId = selected?.chatId;
+      const selectedChatId = sessions.find((session) => session.key === key)?.chatId;
       if (selectedChatId) {
         setCompletedChatIds((current) => {
           if (!current.has(selectedChatId)) return current;
@@ -688,12 +461,6 @@ function Shell({
           return next;
         });
       }
-      if (selected?.workspaceScope) {
-        setDraftWorkspaceScope(normalizeWorkspaceScope(selected.workspaceScope));
-      } else {
-        setDraftWorkspaceScope(null);
-      }
-      setWorkspaceError(null);
       setActiveKey(key);
       setView("chat");
       setMobileSidebarOpen(false);
@@ -745,61 +512,6 @@ function Shell({
     [pendingRename, updateSidebarState],
   );
 
-  const onToggleGroup = useCallback(
-    (groupId: string) => {
-      void updateSidebarState((current) => {
-        const collapsedGroups = { ...current.collapsed_groups };
-        if (groupId === "workspace:chats" || groupId === "date:all") {
-          if (collapsedGroups[groupId] === false) {
-            delete collapsedGroups[groupId];
-          } else {
-            collapsedGroups[groupId] = false;
-          }
-          return {
-            ...current,
-            collapsed_groups: collapsedGroups,
-          };
-        }
-        if (collapsedGroups[groupId]) {
-          delete collapsedGroups[groupId];
-        } else {
-          collapsedGroups[groupId] = true;
-        }
-        return {
-          ...current,
-          collapsed_groups: collapsedGroups,
-        };
-      });
-    },
-    [updateSidebarState],
-  );
-
-  const onRequestRenameProject = useCallback((key: string, label: string) => {
-    setPendingProjectRename({ key, label });
-  }, []);
-
-  const onConfirmProjectRename = useCallback(
-    (title: string) => {
-      if (!pendingProjectRename) return;
-      const key = pendingProjectRename.key;
-      setPendingProjectRename(null);
-      void updateSidebarState((current) => {
-        const projectNameOverrides = { ...current.project_name_overrides };
-        const cleaned = title.trim();
-        if (cleaned) {
-          projectNameOverrides[key] = cleaned;
-        } else {
-          delete projectNameOverrides[key];
-        }
-        return {
-          ...current,
-          project_name_overrides: projectNameOverrides,
-        };
-      });
-    },
-    [pendingProjectRename, updateSidebarState],
-  );
-
   const onToggleArchive = useCallback(
     (key: string) => {
       void updateSidebarState((current) => {
@@ -834,6 +546,19 @@ function Shell({
       },
     }));
   }, [updateSidebarState]);
+
+  const onUpdateSidebarView = useCallback(
+    (viewUpdate: Partial<typeof sidebarState.view>) => {
+      void updateSidebarState((current) => ({
+        ...current,
+        view: {
+          ...current.view,
+          ...viewUpdate,
+        },
+      }));
+    },
+    [updateSidebarState],
+  );
 
   const onOpenSessionSearch = useCallback(() => {
     setMobileSidebarOpen(false);
@@ -1017,165 +742,117 @@ function Shell({
     onTogglePin,
     onRequestRename,
     onToggleArchive,
-    onToggleGroup,
-    onRequestRenameProject,
-    onNewChatInProject,
     onOpenSettings,
     onOpenApps,
     onOpenSearch: onOpenSessionSearch,
     activeUtility: view === "apps" ? "apps" as const : null,
     onToggleArchived,
+    onUpdateView: onUpdateSidebarView,
     pinnedKeys: sidebarState.pinned_keys,
     archivedKeys: sidebarState.archived_keys,
     titleOverrides: sidebarState.title_overrides,
-    projectNameOverrides: sidebarState.project_name_overrides,
-    collapsedGroups: sidebarState.collapsed_groups,
     runningChatIds: runningChatIdList,
     completedChatIds: completedChatIdList,
     viewState: sidebarState.view,
     showArchived: sidebarState.view.show_archived,
     archivedCount: sidebarState.archived_keys.length,
-    defaultWorkspacePath: workspaces?.default_scope.project_path ?? null,
   };
-  const effectiveRuntimeSurface =
-    settingsSnapshot?.surface ?? settingsSnapshot?.runtime_surface ?? runtimeSurface;
-  const isNativeHostSetupSurface = effectiveRuntimeSurface === "native";
-  const showHostChrome = isNativeHostSetupSurface;
   const showMainSidebar = view !== "settings";
 
   return (
     <ThemeProvider theme={theme}>
-      <div
-        className={cn(
-          "relative h-full w-full overflow-hidden",
-          showHostChrome && "bg-sidebar",
-        )}
-      >
-        {showHostChrome ? (
-          <HostChrome
-            onToggleSidebar={showMainSidebar ? toggleSidebar : undefined}
-            theme={theme}
-            onToggleTheme={toggle}
-            showThemeButton={view !== "chat"}
-          />
-        ) : null}
-        <div
-          className={cn(
-            "relative flex h-full w-full overflow-hidden",
-          )}
-        >
-          {/* Host sidebar: in normal flow, so the thread area width stays honest. */}
-          {showMainSidebar ? (
-            <aside
-              className={cn(
-                "relative z-20 hidden shrink-0 overflow-hidden lg:block",
-                "transition-[width] duration-300 ease-out",
-              )}
-              style={{
-                width: hostSidebarOpen ? SIDEBAR_WIDTH : SIDEBAR_RAIL_WIDTH,
-              }}
-            >
-              <div
-                className={cn(
-                  "absolute inset-y-0 left-0 h-full w-full overflow-hidden bg-sidebar",
-                  !showHostChrome && "shadow-inner-right",
-                )}
-              >
-                <Sidebar
-                  {...sidebarProps}
-                  collapsed={!hostSidebarOpen}
-                  hostChromeInset={showHostChrome}
-                  onCollapse={closeHostSidebar}
-                  onExpand={openHostSidebar}
-                />
-              </div>
-            </aside>
-          ) : null}
-
-          {showMainSidebar ? (
-            <Sheet
-              open={mobileSidebarOpen}
-              onOpenChange={(open) => setMobileSidebarOpen(open)}
-            >
-              <SheetContent
-                side="left"
-                showCloseButton={false}
-                aria-describedby={undefined}
-                className="p-0 lg:hidden"
-                style={{ width: SIDEBAR_WIDTH, maxWidth: SIDEBAR_WIDTH }}
-              >
-                <SheetTitle className="sr-only">{t("sidebar.navigation")}</SheetTitle>
-                <Sidebar
-                  {...sidebarProps}
-                  onCollapse={closeMobileSidebar}
-                  containActionMenus
-                />
-              </SheetContent>
-            </Sheet>
-          ) : null}
-
-          <SessionSearchDialog
-            open={sessionSearchOpen}
-            onOpenChange={setSessionSearchOpen}
-            sessions={sessions}
-            activeKey={activeKey}
-            loading={loading}
-            titleOverrides={sidebarState.title_overrides}
-            onSelect={onSelectSearchResult}
-          />
-          <main
+      <div className="relative flex h-full w-full overflow-hidden">
+        {/* Desktop sidebar: in normal flow, so the thread area width stays honest. */}
+        {showMainSidebar ? (
+          <aside
             className={cn(
-              "relative flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background",
-              showHostChrome &&
-                "rounded-l-[28px] shadow-[-18px_0_32px_-30px_rgb(0_0_0/0.45)] dark:shadow-[-18px_0_32px_-30px_rgb(0_0_0/0.85)]",
+              "relative z-20 hidden shrink-0 overflow-hidden lg:block",
+              "transition-[width] duration-300 ease-out",
             )}
+            style={{
+              width: desktopSidebarOpen ? SIDEBAR_WIDTH : SIDEBAR_RAIL_WIDTH,
+            }}
           >
             <div
-              className={cn(
-                "absolute inset-0 flex flex-col",
-                view !== "chat" && "invisible pointer-events-none",
-              )}
+              className="absolute inset-y-0 left-0 h-full w-full overflow-hidden bg-sidebar shadow-inner-right"
             >
-              <ThreadShell
-                session={activeSession}
-                title={headerTitle}
-                onToggleSidebar={toggleSidebar}
-                onNewChat={onNewChat}
-                onCreateChat={onCreateChat}
-                onTurnEnd={onTurnEnd}
-                theme={theme}
-                onToggleTheme={toggle}
-                hideSidebarToggleForHostChrome
-                hideHeader={false}
-                workspaceScope={activeWorkspaceScope}
-                workspaceDefaultScope={workspaces?.default_scope ?? null}
-                workspaceControls={workspaces?.controls ?? null}
-                workspaceScopeDisabled={activeChatRunning}
-                workspaceError={workspaceError}
-                onWorkspaceScopeChange={applyWorkspaceScope}
-                settingsSnapshot={settingsSnapshot}
+              <Sidebar
+                {...sidebarProps}
+                collapsed={!desktopSidebarOpen}
+                onCollapse={closeDesktopSidebar}
+                onExpand={openDesktopSidebar}
               />
             </div>
-            {view !== "chat" && (
-              <div className="absolute inset-0 flex flex-col">
-                <SettingsView
-                  theme={theme}
-                  initialSection={settingsInitialSection}
-                  showSidebar={view === "settings"}
-                  onToggleTheme={toggle}
-                  onBackToChat={onBackToChat}
-                  onModelNameChange={onModelNameChange}
-                  onSettingsChange={setSettingsSnapshot}
-                  onWorkspaceSettingsChange={refreshWorkspaces}
-                  onLogout={onLogout}
-                  onRestart={onRestart}
-                  isRestarting={isRestarting}
-                  hostChromeInset={showHostChrome}
-                />
-              </div>
+          </aside>
+        ) : null}
+
+        {showMainSidebar ? (
+          <Sheet
+            open={mobileSidebarOpen}
+            onOpenChange={(open) => setMobileSidebarOpen(open)}
+          >
+            <SheetContent
+              side="left"
+              showCloseButton={false}
+              aria-describedby={undefined}
+              className="p-0 lg:hidden"
+              style={{ width: SIDEBAR_WIDTH, maxWidth: SIDEBAR_WIDTH }}
+            >
+              <SheetTitle className="sr-only">{t("sidebar.navigation")}</SheetTitle>
+              <Sidebar
+                {...sidebarProps}
+                onCollapse={closeMobileSidebar}
+                containActionMenus
+              />
+            </SheetContent>
+          </Sheet>
+        ) : null}
+
+        <SessionSearchDialog
+          open={sessionSearchOpen}
+          onOpenChange={setSessionSearchOpen}
+          sessions={sessions}
+          activeKey={activeKey}
+          loading={loading}
+          titleOverrides={sidebarState.title_overrides}
+          onSelect={onSelectSearchResult}
+        />
+
+        <main className="relative flex h-full min-w-0 flex-1 flex-col">
+          <div
+            className={cn(
+              "absolute inset-0 flex flex-col",
+              view !== "chat" && "invisible pointer-events-none",
             )}
-          </main>
-        </div>
+          >
+            <ThreadShell
+              session={activeSession}
+              title={headerTitle}
+              onToggleSidebar={toggleSidebar}
+              onNewChat={onNewChat}
+              onCreateChat={onCreateChat}
+              onTurnEnd={onTurnEnd}
+              theme={theme}
+              onToggleTheme={toggle}
+              hideSidebarToggleOnDesktop
+            />
+          </div>
+          {view !== "chat" && (
+            <div className="absolute inset-0 flex flex-col">
+              <SettingsView
+                theme={theme}
+                initialSection={settingsInitialSection}
+                showSidebar={view === "settings"}
+                onToggleTheme={toggle}
+                onBackToChat={onBackToChat}
+                onModelNameChange={onModelNameChange}
+                onLogout={onLogout}
+                onRestart={onRestart}
+                isRestarting={isRestarting}
+              />
+            </div>
+          )}
+        </main>
 
         <DeleteConfirm
           open={!!pendingDelete}
@@ -1188,15 +865,6 @@ function Shell({
           title={pendingRename?.label ?? ""}
           onCancel={() => setPendingRename(null)}
           onConfirm={onConfirmRename}
-        />
-        <RenameChatDialog
-          open={!!pendingProjectRename}
-          title={pendingProjectRename?.label ?? ""}
-          dialogTitle={t("chat.renameProjectTitle")}
-          description={t("chat.renameProjectDescription")}
-          placeholder={t("chat.renameProjectPlaceholder")}
-          onCancel={() => setPendingProjectRename(null)}
-          onConfirm={onConfirmProjectRename}
         />
         {restartToast ? (
           <div
