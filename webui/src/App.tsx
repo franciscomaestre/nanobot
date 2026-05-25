@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DeleteConfirm } from "@/components/DeleteConfirm";
+import { RenameChatDialog } from "@/components/RenameChatDialog";
 import { Sidebar } from "@/components/Sidebar";
-import { SettingsView } from "@/components/settings/SettingsView";
+import { SessionSearchDialog } from "@/components/SessionSearchDialog";
+import { SettingsView, type SettingsSectionKey } from "@/components/settings/SettingsView";
 import { ThreadShell } from "@/components/thread/ThreadShell";
-import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 
 import { useSessions } from "@/hooks/useSessions";
 import { useDeferredTitleRefresh } from "@/hooks/useDeferredTitleRefresh";
+import { useSidebarState } from "@/hooks/useSidebarState";
 import { ThemeProvider, useTheme } from "@/hooks/useTheme";
 import { cn } from "@/lib/utils";
 import {
@@ -32,13 +35,31 @@ type BootState =
       status: "ready";
       client: NanobotClient;
       token: string;
+      tokenExpiresAt: number;
       modelName: string | null;
     };
 
 const SIDEBAR_STORAGE_KEY = "nanobot-webui.sidebar";
+const COMPLETED_RUNS_STORAGE_KEY = "nanobot-webui.sidebar.completed-runs.v1";
 const RESTART_STARTED_KEY = "nanobot-webui.restartStartedAt";
 const SIDEBAR_WIDTH = 272;
-type ShellView = "chat" | "settings";
+const SIDEBAR_RAIL_WIDTH = 56;
+const TOKEN_REFRESH_MARGIN_MS = 30_000;
+const TOKEN_REFRESH_MIN_DELAY_MS = 5_000;
+type ShellView = "chat" | "settings" | "apps";
+
+function bootstrapTokenExpiresAt(expiresInSeconds: number): number {
+  return Date.now() + Math.max(0, expiresInSeconds) * 1000;
+}
+
+function tokenRefreshDelayMs(expiresAt: number): number {
+  const remaining = Math.max(0, expiresAt - Date.now());
+  const margin = Math.min(
+    TOKEN_REFRESH_MARGIN_MS,
+    Math.max(1_000, remaining / 2),
+  );
+  return Math.max(TOKEN_REFRESH_MIN_DELAY_MS, remaining - margin);
+}
 
 function AuthForm({
   failed,
@@ -105,9 +126,33 @@ function readSidebarOpen(): boolean {
   }
 }
 
+function readCompletedRunChatIds(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(COMPLETED_RUNS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((item): item is string => typeof item === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeCompletedRunChatIds(chatIds: Set<string>): void {
+  try {
+    window.localStorage.setItem(
+      COMPLETED_RUNS_STORAGE_KEY,
+      JSON.stringify(Array.from(chatIds)),
+    );
+  } catch {
+    // ignore storage errors (private mode, etc.)
+  }
+}
+
 export default function App() {
   const { t } = useTranslation();
   const [state, setState] = useState<BootState>({ status: "loading" });
+  const bootstrapSecretRef = useRef("");
 
   const bootstrapWithSecret = useCallback(
     (secret: string) => {
@@ -119,22 +164,37 @@ export default function App() {
           if (cancelled) return;
           if (secret) saveSecret(secret);
           const url = deriveWsUrl(boot.ws_path, boot.token);
-          const client = new NanobotClient({
+          let client: NanobotClient;
+          client = new NanobotClient({
             url,
             onReauth: async () => {
               try {
-                const refreshed = await fetchBootstrap("", secret);
-                return deriveWsUrl(refreshed.ws_path, refreshed.token);
+                const refreshed = await fetchBootstrap("", bootstrapSecretRef.current);
+                const refreshedUrl = deriveWsUrl(refreshed.ws_path, refreshed.token);
+                const tokenExpiresAt = bootstrapTokenExpiresAt(refreshed.expires_in);
+                setState((current) =>
+                  current.status === "ready" && current.client === client
+                    ? {
+                        ...current,
+                        token: refreshed.token,
+                        tokenExpiresAt,
+                        modelName: refreshed.model_name ?? current.modelName,
+                      }
+                    : current,
+                );
+                return refreshedUrl;
               } catch {
                 return null;
               }
             },
           });
+          bootstrapSecretRef.current = secret;
           client.connect();
           setState({
             status: "ready",
             client,
             token: boot.token,
+            tokenExpiresAt: bootstrapTokenExpiresAt(boot.expires_in),
             modelName: boot.model_name ?? null,
           });
         } catch (e) {
@@ -153,6 +213,35 @@ export default function App() {
     },
     [],
   );
+
+  useEffect(() => {
+    if (state.status !== "ready") return;
+    const client = state.client;
+    const timer = window.setTimeout(async () => {
+      try {
+        const boot = await fetchBootstrap("", bootstrapSecretRef.current);
+        const url = deriveWsUrl(boot.ws_path, boot.token);
+        const tokenExpiresAt = bootstrapTokenExpiresAt(boot.expires_in);
+        client.updateUrl(url);
+        setState((current) =>
+          current.status === "ready" && current.client === client
+            ? {
+                ...current,
+                token: boot.token,
+                tokenExpiresAt,
+                modelName: boot.model_name ?? current.modelName,
+              }
+            : current,
+        );
+      } catch (e) {
+        const msg = (e as Error).message;
+        if (msg.includes("HTTP 401") || msg.includes("HTTP 403")) {
+          setState({ status: "auth", failed: true });
+        }
+      }
+    }, tokenRefreshDelayMs(state.tokenExpiresAt));
+    return () => window.clearTimeout(timer);
+  }, [state]);
 
   useEffect(() => {
     const saved = loadSavedSecret();
@@ -232,18 +321,29 @@ function Shell({
   const { client } = useClient();
   const { theme, toggle } = useTheme();
   const { sessions, loading, refresh, createChat, deleteChat } = useSessions();
+  const { state: sidebarState, update: updateSidebarState } =
+    useSidebarState(sessions, !loading);
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [view, setView] = useState<ShellView>("chat");
+  const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSectionKey>("overview");
   const [desktopSidebarOpen, setDesktopSidebarOpen] =
     useState<boolean>(readSidebarOpen);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<{
+    key: string;
+    label: string;
+  } | null>(null);
+  const [pendingRename, setPendingRename] = useState<{
     key: string;
     label: string;
   } | null>(null);
   const restartSawDisconnectRef = useRef(false);
   const [restartToast, setRestartToast] = useState<string | null>(null);
   const [isRestarting, setIsRestarting] = useState(false);
+  const [runningChatIds, setRunningChatIds] = useState<Set<string>>(() => new Set());
+  const [completedChatIds, setCompletedChatIds] = useState<Set<string>>(readCompletedRunChatIds);
+  const runningChatIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     try {
@@ -256,15 +356,65 @@ function Shell({
     }
   }, [desktopSidebarOpen]);
 
-
+  useEffect(() => {
+    writeCompletedRunChatIds(completedChatIds);
+  }, [completedChatIds]);
 
   const activeSession = useMemo<ChatSummary | null>(() => {
     if (!activeKey) return null;
     return sessions.find((s) => s.key === activeKey) ?? null;
   }, [sessions, activeKey]);
+  const runningChatIdList = useMemo(() => Array.from(runningChatIds), [runningChatIds]);
+  const completedChatIdList = useMemo(() => Array.from(completedChatIds), [completedChatIds]);
+
+  useEffect(() => {
+    if (loading) return;
+    const knownChatIds = new Set(sessions.map((session) => session.chatId));
+    setCompletedChatIds((current) => {
+      const next = new Set(
+        Array.from(current).filter((chatId) => knownChatIds.has(chatId)),
+      );
+      return next.size === current.size ? current : next;
+    });
+  }, [loading, sessions]);
+
+  useEffect(() => {
+    if (loading) return;
+    const activeRunIds = sessions
+      .filter((session) => typeof session.runStartedAt === "number")
+      .map((session) => session.chatId);
+    if (activeRunIds.length === 0) return;
+
+    for (const chatId of activeRunIds) {
+      client.attach(chatId);
+    }
+    setRunningChatIds((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const chatId of activeRunIds) {
+        if (!next.has(chatId)) changed = true;
+        next.add(chatId);
+      }
+      if (!changed) return current;
+      runningChatIdsRef.current = next;
+      return next;
+    });
+    setCompletedChatIds((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const chatId of activeRunIds) {
+        if (next.delete(chatId)) changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [client, loading, sessions]);
 
   const closeDesktopSidebar = useCallback(() => {
     setDesktopSidebarOpen(false);
+  }, []);
+
+  const openDesktopSidebar = useCallback(() => {
+    setDesktopSidebarOpen(true);
   }, []);
 
   const closeMobileSidebar = useCallback(() => {
@@ -303,15 +453,153 @@ function Shell({
 
   const onSelectChat = useCallback(
     (key: string) => {
+      const selectedChatId = sessions.find((session) => session.key === key)?.chatId;
+      if (selectedChatId) {
+        setCompletedChatIds((current) => {
+          if (!current.has(selectedChatId)) return current;
+          const next = new Set(current);
+          next.delete(selectedChatId);
+          return next;
+        });
+      }
       setActiveKey(key);
       setView("chat");
       setMobileSidebarOpen(false);
     },
-    [],
+    [sessions],
   );
 
-  const onOpenSettings = useCallback(() => {
+  const onTogglePin = useCallback(
+    (key: string) => {
+      void updateSidebarState((current) => {
+        const pinned = new Set(current.pinned_keys);
+        if (pinned.has(key)) {
+          pinned.delete(key);
+        } else {
+          pinned.add(key);
+        }
+        return {
+          ...current,
+          pinned_keys: Array.from(pinned),
+        };
+      });
+    },
+    [updateSidebarState],
+  );
+
+  const onRequestRename = useCallback((key: string, label: string) => {
+    setPendingRename({ key, label });
+  }, []);
+
+  const onConfirmRename = useCallback(
+    (title: string) => {
+      if (!pendingRename) return;
+      const key = pendingRename.key;
+      setPendingRename(null);
+      void updateSidebarState((current) => {
+        const titleOverrides = { ...current.title_overrides };
+        const cleaned = title.trim();
+        if (cleaned) {
+          titleOverrides[key] = cleaned;
+        } else {
+          delete titleOverrides[key];
+        }
+        return {
+          ...current,
+          title_overrides: titleOverrides,
+        };
+      });
+    },
+    [pendingRename, updateSidebarState],
+  );
+
+  const onToggleArchive = useCallback(
+    (key: string) => {
+      void updateSidebarState((current) => {
+        const archived = new Set(current.archived_keys);
+        const pinned = current.pinned_keys.filter((item) => item !== key);
+        if (archived.has(key)) {
+          archived.delete(key);
+        } else {
+          archived.add(key);
+        }
+        return {
+          ...current,
+          pinned_keys: pinned,
+          archived_keys: Array.from(archived),
+        };
+      });
+      if (activeKey === key && !sidebarState.archived_keys.includes(key)) {
+        const archived = new Set([...sidebarState.archived_keys, key]);
+        const next = sessions.find((session) => !archived.has(session.key));
+        setActiveKey(next?.key ?? null);
+      }
+    },
+    [activeKey, sessions, sidebarState.archived_keys, updateSidebarState],
+  );
+
+  const onToggleArchived = useCallback(() => {
+    void updateSidebarState((current) => ({
+      ...current,
+      view: {
+        ...current.view,
+        show_archived: !current.view.show_archived,
+      },
+    }));
+  }, [updateSidebarState]);
+
+  const onUpdateSidebarView = useCallback(
+    (viewUpdate: Partial<typeof sidebarState.view>) => {
+      void updateSidebarState((current) => ({
+        ...current,
+        view: {
+          ...current.view,
+          ...viewUpdate,
+        },
+      }));
+    },
+    [updateSidebarState],
+  );
+
+  const onOpenSessionSearch = useCallback(() => {
+    setMobileSidebarOpen(false);
+    setSessionSearchOpen(true);
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      const plainCommandK =
+        (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
+      if (!plainCommandK) return;
+      if (event.key.toLowerCase() !== "k") return;
+      event.preventDefault();
+      onOpenSessionSearch();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onOpenSessionSearch]);
+
+  const onSelectSearchResult = useCallback(
+    (key: string) => {
+      setSessionSearchOpen(false);
+      onSelectChat(key);
+    },
+    [onSelectChat],
+  );
+
+  const onOpenSettings = useCallback((section: SettingsSectionKey = "overview") => {
+    setSessionSearchOpen(false);
+    setSettingsInitialSection(section);
     setView("settings");
+    setMobileSidebarOpen(false);
+  }, []);
+
+  const onOpenApps = useCallback(() => {
+    setSessionSearchOpen(false);
+    setSettingsInitialSection("apps");
+    setView("apps");
     setMobileSidebarOpen(false);
   }, []);
 
@@ -343,6 +631,35 @@ function Shell({
       onModelNameChange(modelName);
     });
   }, [client, onModelNameChange]);
+
+  useEffect(() => {
+    return client.onRunStatus((chatId, startedAt) => {
+      if (startedAt != null) {
+        const nextRunning = new Set(runningChatIdsRef.current);
+        nextRunning.add(chatId);
+        runningChatIdsRef.current = nextRunning;
+        setRunningChatIds(nextRunning);
+        setCompletedChatIds((current) => {
+          if (!current.has(chatId)) return current;
+          const next = new Set(current);
+          next.delete(chatId);
+          return next;
+        });
+        return;
+      }
+
+      if (!runningChatIdsRef.current.has(chatId)) return;
+      const nextRunning = new Set(runningChatIdsRef.current);
+      nextRunning.delete(chatId);
+      runningChatIdsRef.current = nextRunning;
+      setRunningChatIds(nextRunning);
+      setCompletedChatIds((current) => {
+        const next = new Set(current);
+        next.add(chatId);
+        return next;
+      });
+    });
+  }, [client]);
 
   useEffect(() => {
     return client.onStatus((status) => {
@@ -391,7 +708,8 @@ function Shell({
   }, [pendingDelete, deleteChat, activeKey, sessions]);
 
   const headerTitle = activeSession
-    ? activeSession.title ||
+    ? sidebarState.title_overrides[activeSession.key] ||
+      activeSession.title ||
       deriveTitle(activeSession.preview, t("chat.newChat"))
     : t("app.brand");
 
@@ -399,6 +717,12 @@ function Shell({
     if (view === "settings") {
       document.title = t("app.documentTitle.chat", {
         title: t("settings.sidebar.title"),
+      });
+      return;
+    }
+    if (view === "apps") {
+      document.title = t("app.documentTitle.chat", {
+        title: t("settings.nav.apps", { defaultValue: "Apps" }),
       });
       return;
     }
@@ -415,7 +739,23 @@ function Shell({
     onSelect: onSelectChat,
     onRequestDelete: (key: string, label: string) =>
       setPendingDelete({ key, label }),
+    onTogglePin,
+    onRequestRename,
+    onToggleArchive,
     onOpenSettings,
+    onOpenApps,
+    onOpenSearch: onOpenSessionSearch,
+    activeUtility: view === "apps" ? "apps" as const : null,
+    onToggleArchived,
+    onUpdateView: onUpdateSidebarView,
+    pinnedKeys: sidebarState.pinned_keys,
+    archivedKeys: sidebarState.archived_keys,
+    titleOverrides: sidebarState.title_overrides,
+    runningChatIds: runningChatIdList,
+    completedChatIds: completedChatIdList,
+    viewState: sidebarState.view,
+    showArchived: sidebarState.view.show_archived,
+    archivedCount: sidebarState.archived_keys.length,
   };
   const showMainSidebar = view !== "settings";
 
@@ -429,17 +769,19 @@ function Shell({
               "relative z-20 hidden shrink-0 overflow-hidden lg:block",
               "transition-[width] duration-300 ease-out",
             )}
-            style={{ width: desktopSidebarOpen ? SIDEBAR_WIDTH : 0 }}
+            style={{
+              width: desktopSidebarOpen ? SIDEBAR_WIDTH : SIDEBAR_RAIL_WIDTH,
+            }}
           >
             <div
-              className={cn(
-                "absolute inset-y-0 left-0 h-full overflow-hidden bg-sidebar shadow-inner-right",
-                "transition-transform duration-300 ease-out",
-                desktopSidebarOpen ? "translate-x-0" : "-translate-x-full",
-              )}
-              style={{ width: SIDEBAR_WIDTH }}
+              className="absolute inset-y-0 left-0 h-full w-full overflow-hidden bg-sidebar shadow-inner-right"
             >
-              <Sidebar {...sidebarProps} onCollapse={closeDesktopSidebar} />
+              <Sidebar
+                {...sidebarProps}
+                collapsed={!desktopSidebarOpen}
+                onCollapse={closeDesktopSidebar}
+                onExpand={openDesktopSidebar}
+              />
             </div>
           </aside>
         ) : null}
@@ -452,19 +794,35 @@ function Shell({
             <SheetContent
               side="left"
               showCloseButton={false}
+              aria-describedby={undefined}
               className="p-0 lg:hidden"
               style={{ width: SIDEBAR_WIDTH, maxWidth: SIDEBAR_WIDTH }}
             >
-              <Sidebar {...sidebarProps} onCollapse={closeMobileSidebar} />
+              <SheetTitle className="sr-only">{t("sidebar.navigation")}</SheetTitle>
+              <Sidebar
+                {...sidebarProps}
+                onCollapse={closeMobileSidebar}
+                containActionMenus
+              />
             </SheetContent>
           </Sheet>
         ) : null}
+
+        <SessionSearchDialog
+          open={sessionSearchOpen}
+          onOpenChange={setSessionSearchOpen}
+          sessions={sessions}
+          activeKey={activeKey}
+          loading={loading}
+          titleOverrides={sidebarState.title_overrides}
+          onSelect={onSelectSearchResult}
+        />
 
         <main className="relative flex h-full min-w-0 flex-1 flex-col">
           <div
             className={cn(
               "absolute inset-0 flex flex-col",
-              view === "settings" && "invisible pointer-events-none",
+              view !== "chat" && "invisible pointer-events-none",
             )}
           >
             <ThreadShell
@@ -476,13 +834,15 @@ function Shell({
               onTurnEnd={onTurnEnd}
               theme={theme}
               onToggleTheme={toggle}
-              hideSidebarToggleOnDesktop={desktopSidebarOpen}
+              hideSidebarToggleOnDesktop
             />
           </div>
-          {view === "settings" && (
+          {view !== "chat" && (
             <div className="absolute inset-0 flex flex-col">
               <SettingsView
                 theme={theme}
+                initialSection={settingsInitialSection}
+                showSidebar={view === "settings"}
                 onToggleTheme={toggle}
                 onBackToChat={onBackToChat}
                 onModelNameChange={onModelNameChange}
@@ -499,6 +859,12 @@ function Shell({
           title={pendingDelete?.label ?? ""}
           onCancel={() => setPendingDelete(null)}
           onConfirm={onConfirmDelete}
+        />
+        <RenameChatDialog
+          open={!!pendingRename}
+          title={pendingRename?.label ?? ""}
+          onCancel={() => setPendingRename(null)}
+          onConfirm={onConfirmRename}
         />
         {restartToast ? (
           <div

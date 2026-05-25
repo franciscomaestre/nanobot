@@ -15,6 +15,7 @@ const SETTINGS_NAV_KEYS = [
   "providers",
   "image",
   "web",
+  "apps",
   "runtime",
   "advanced",
 ];
