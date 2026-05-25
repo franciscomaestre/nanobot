@@ -8,8 +8,7 @@ import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -17,14 +16,12 @@ from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.utils.file_edit_events import (
-    StreamingFileEditTracker,
     build_file_edit_end_event,
     build_file_edit_error_event,
     build_file_edit_start_event,
-    prepare_file_edit_trackers,
-)
-from nanobot.utils.file_edit_events import (
     prepare_file_edit_tracker as _prepare_file_edit_tracker,
+    prepare_file_edit_trackers,
+    StreamingFileEditTracker,
 )
 from nanobot.utils.helpers import (
     IncrementalThinkExtractor,
@@ -45,6 +42,7 @@ from nanobot.utils.prompt_templates import render_template
 from nanobot.utils.runtime import (
     EMPTY_FINAL_RESPONSE_MESSAGE,
     build_finalization_retry_message,
+    build_goal_continue_message,
     build_length_recovery_message,
     ensure_nonempty_tool_result,
     is_blank_text,
@@ -181,19 +179,16 @@ class AgentRunner:
         and *iteration* are both provided) and return (True, cycles+1) so the
         caller continues the iteration loop.  Otherwise return (False, cycles).
         """
-        injections: list[dict[str, Any]] = []
-        real_injection = False
-        if injection_cycles < _MAX_INJECTION_CYCLES:
-            injections = await self._drain_injections(spec)
-            real_injection = bool(injections)
+        if injection_cycles >= _MAX_INJECTION_CYCLES:
+            return False, injection_cycles
+        injections = await self._drain_injections(spec)
         if not injections and allow_goal_continue and assistant_message is not None:
             predicate = spec.goal_active_predicate
             if predicate is not None and predicate():
                 injections = [build_goal_continue_message(spec.goal_continue_message)]
         if not injections:
             return False, injection_cycles
-        if real_injection:
-            injection_cycles += 1
+        injection_cycles += 1
         if assistant_message is not None:
             messages.append(assistant_message)
             if iteration is not None:
@@ -209,13 +204,10 @@ class AgentRunner:
                     },
                 )
         self._append_injected_messages(messages, injections)
-        if real_injection:
-            logger.info(
-                "Injected {} follow-up message(s) {} ({}/{})",
-                len(injections), phase, injection_cycles, _MAX_INJECTION_CYCLES,
-            )
-        else:
-            logger.info("Injected sustained-goal continuation {}", phase)
+        logger.info(
+            "Injected {} follow-up message(s) {} ({}/{})",
+            len(injections), phase, injection_cycles, _MAX_INJECTION_CYCLES,
+        )
         return True, injection_cycles
 
     async def _drain_injections(self, spec: AgentRunSpec) -> list[dict[str, Any]]:
@@ -1273,13 +1265,7 @@ class AgentRunner:
             return messages
 
         system_tokens = sum(estimate_message_tokens(msg) for msg in system_messages)
-        fixed_tokens, _ = estimate_prompt_tokens_chain(
-            self.provider,
-            spec.model,
-            system_messages,
-            spec.tools.get_definitions(),
-        )
-        remaining_budget = max(0, budget - max(system_tokens, fixed_tokens))
+        remaining_budget = max(128, budget - system_tokens)
         kept: list[dict[str, Any]] = []
         kept_tokens = 0
         for message in reversed(non_system):
