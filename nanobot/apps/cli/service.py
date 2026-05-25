@@ -24,18 +24,46 @@ from nanobot.config.paths import get_runtime_subdir
 CLI_ANYTHING_REGISTRY_URL = "https://hkuds.github.io/CLI-Anything/registry.json"
 CLI_ANYTHING_PUBLIC_REGISTRY_URL = "https://hkuds.github.io/CLI-Anything/public_registry.json"
 CLI_ANYTHING_RAW_BASE = "https://raw.githubusercontent.com/HKUDS/CLI-Anything/main"
-NANOBOT_EXTENSION_REGISTRY_URL = "https://raw.githubusercontent.com/Re-bin/nanobot-extension/main/registry.json"
-NANOBOT_EXTENSION_RAW_BASE = "https://raw.githubusercontent.com/Re-bin/nanobot-extension/main"
-_CATALOG_SOURCES = (
-    ("harness", CLI_ANYTHING_REGISTRY_URL, CLI_ANYTHING_RAW_BASE, True),
-    ("public", CLI_ANYTHING_PUBLIC_REGISTRY_URL, CLI_ANYTHING_RAW_BASE, True),
-    ("extensions", NANOBOT_EXTENSION_REGISTRY_URL, NANOBOT_EXTENSION_RAW_BASE, False),
-)
+CLI_ANYTHING_RAW_SKILLS_BASE = f"{CLI_ANYTHING_RAW_BASE}/skills/"
 
 _MAX_TOOL_OUTPUT_CHARS = 12_000
+_MAX_ARTIFACT_SCAN_PATHS = 4_000
+_MAX_ARTIFACT_REPORT = 12
 _SAFE_NAME_RE = re.compile(r"[^a-z0-9_-]+")
 _MENTION_RE = re.compile(r"(^|[\s([{])@([a-z0-9_-]+)\b", re.IGNORECASE)
 _SHELL_META_CHARS = ("|", "&&", "||", ";", "$(", "`", ">", "<")
+_ARTIFACT_EXTENSIONS = frozenset({
+    ".csv",
+    ".drawio",
+    ".gif",
+    ".html",
+    ".jpeg",
+    ".jpg",
+    ".json",
+    ".md",
+    ".pdf",
+    ".png",
+    ".svg",
+    ".txt",
+    ".vsdx",
+    ".webp",
+    ".xml",
+})
+_INLINE_ARTIFACT_EXTENSIONS = frozenset({".gif", ".jpeg", ".jpg", ".png", ".webp"})
+_ARTIFACT_IGNORE_DIRS = frozenset({
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".nanobot",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+})
 
 
 class CliAppError(ValueError):
@@ -314,17 +342,16 @@ def _safe_skill_path(value: str) -> str | None:
     return value if parts[-1] == "SKILL.md" else None
 
 
-def _skill_content_url(skill_md: str, *, raw_base: str = CLI_ANYTHING_RAW_BASE) -> str | None:
+def _skill_content_url(skill_md: str) -> str | None:
     safe_path = _safe_skill_path(skill_md)
     if safe_path:
-        return f"{raw_base.rstrip('/')}/{safe_path}"
+        return f"{CLI_ANYTHING_RAW_BASE}/{safe_path}"
     parsed = urlparse(skill_md)
     if parsed.scheme != "https" or parsed.netloc != "raw.githubusercontent.com":
         return None
-    raw_prefix = raw_base.rstrip("/") + "/"
-    if not skill_md.startswith(raw_prefix):
+    if not skill_md.startswith(CLI_ANYTHING_RAW_SKILLS_BASE):
         return None
-    suffix = skill_md.removeprefix(raw_prefix)
+    suffix = skill_md.removeprefix(f"{CLI_ANYTHING_RAW_BASE}/")
     return skill_md if _safe_skill_path(suffix) else None
 
 
@@ -400,22 +427,27 @@ class CliAppManager:
         return data
 
     def catalog(self, *, force_refresh: bool = False) -> tuple[list[dict[str, Any]], str | None]:
-        registries: list[tuple[str, str, dict[str, Any]]] = []
-        for source, url, raw_base, required in _CATALOG_SOURCES:
-            try:
-                registry = self._fetch_registry(
-                    url,
-                    self._cache_path(source),
+        registries = [
+            (
+                "harness",
+                self._fetch_registry(
+                    CLI_ANYTHING_REGISTRY_URL,
+                    self._cache_path("harness"),
                     force_refresh=force_refresh,
-                )
-            except Exception:
-                if required:
-                    raise
-                continue
-            registries.append((source, raw_base, registry))
+                ),
+            ),
+            (
+                "public",
+                self._fetch_registry(
+                    CLI_ANYTHING_PUBLIC_REGISTRY_URL,
+                    self._cache_path("public"),
+                    force_refresh=force_refresh,
+                ),
+            ),
+        ]
         apps_by_name: dict[str, dict[str, Any]] = {}
         updated_values: list[str] = []
-        for source, raw_base, registry in registries:
+        for source, registry in registries:
             meta = registry.get("meta")
             if isinstance(meta, dict) and isinstance(meta.get("updated"), str):
                 updated_values.append(meta["updated"])
@@ -424,7 +456,6 @@ class CliAppManager:
                     continue
                 entry = dict(row)
                 entry["_source"] = source
-                entry["_raw_base"] = raw_base
                 key = str(entry["name"]).lower()
                 previous = apps_by_name.get(key)
                 if previous:
@@ -436,15 +467,6 @@ class CliAppManager:
                 else:
                     apps_by_name[key] = entry
         return list(apps_by_name.values()), max(updated_values) if updated_values else None
-
-    def _manifest_source(self, app: dict[str, Any]) -> str:
-        source = str(app.get("_source") or "harness")
-        if source == "extensions":
-            return "nanobot-extension"
-        return f"cli-anything:{source}"
-
-    def _trust_registry(self, app: dict[str, Any]) -> str:
-        return "nanobot-extension" if str(app.get("_source") or "") == "extensions" else "cli-anything"
 
     def get_app(self, name: str, *, force_refresh: bool = False) -> dict[str, Any]:
         wanted = name.lower()
@@ -610,14 +632,14 @@ class CliAppManager:
             version=str(app.get("version") or ""),
             description=str(app.get("description") or ""),
             category=str(app.get("category") or "uncategorized"),
-            source=self._manifest_source(app),
+            source=f"cli-anything:{app.get('_source') or 'harness'}",
             logo_url=logo_url,
             brand_color=brand_color,
             capabilities=capabilities,
             install=install,
             remove=remove,
             trust={
-                "registry": self._trust_registry(app),
+                "registry": "cli-anything",
                 "level": "catalog",
                 "review_status": "catalog_entry",
             },
@@ -763,7 +785,7 @@ class CliAppManager:
         skill_md = str(app.get("skill_md") or "").strip()
         if not skill_md:
             return None
-        url = _skill_content_url(skill_md, raw_base=str(app.get("_raw_base") or CLI_ANYTHING_RAW_BASE))
+        url = _skill_content_url(skill_md)
         if not url:
             return None
         try:
@@ -1000,6 +1022,87 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
             raise CliAppError("working_dir is outside the configured workspace")
         return cwd
 
+    def _iter_artifact_candidates(self, cwd: Path) -> list[Path]:
+        if not cwd.is_dir():
+            return []
+        out: list[Path] = []
+        stack = [cwd]
+        scanned = 0
+        while stack and scanned < _MAX_ARTIFACT_SCAN_PATHS:
+            directory = stack.pop()
+            try:
+                entries = sorted(directory.iterdir(), key=lambda path: path.name.lower())
+            except OSError:
+                continue
+            for path in entries:
+                if scanned >= _MAX_ARTIFACT_SCAN_PATHS:
+                    break
+                scanned += 1
+                try:
+                    if path.is_dir() and not path.is_symlink():
+                        if path.name not in _ARTIFACT_IGNORE_DIRS:
+                            stack.append(path)
+                        continue
+                    if path.is_file() and path.suffix.lower() in _ARTIFACT_EXTENSIONS:
+                        out.append(path.resolve(strict=False))
+                except OSError:
+                    continue
+        return out
+
+    def _artifact_snapshot(self, cwd: Path) -> dict[Path, tuple[int, int]]:
+        snapshot: dict[Path, tuple[int, int]] = {}
+        for path in self._iter_artifact_candidates(cwd):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            snapshot[path] = (stat.st_mtime_ns, stat.st_size)
+        return snapshot
+
+    def _changed_artifacts(
+        self,
+        cwd: Path,
+        before: dict[Path, tuple[int, int]],
+    ) -> list[Path]:
+        changed: list[tuple[int, Path]] = []
+        for path, stamp in self._artifact_snapshot(cwd).items():
+            if before.get(path) == stamp:
+                continue
+            changed.append((stamp[0], path))
+        changed.sort(key=lambda item: (item[0], item[1].name.lower()))
+        return [path for _, path in changed[-_MAX_ARTIFACT_REPORT:]]
+
+    def _format_artifact_path(self, cwd: Path, path: Path) -> str:
+        try:
+            return path.relative_to(cwd).as_posix()
+        except ValueError:
+            return path.name
+
+    @staticmethod
+    def _format_artifact_size(path: Path) -> str:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return "unknown size"
+        if size < 1024:
+            return f"{size} B"
+        if size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        return f"{size / (1024 * 1024):.1f} MB"
+
+    def _format_artifact_lines(self, cwd: Path, paths: list[Path]) -> list[str]:
+        lines: list[str] = []
+        for path in paths:
+            rel = self._format_artifact_path(cwd, path)
+            ext = path.suffix.lower()
+            kind = (
+                "previewable image"
+                if ext in _INLINE_ARTIFACT_EXTENSIONS
+                else ext.lstrip(".") or "file"
+            )
+            lines.append(f"- {rel} ({kind}, {self._format_artifact_size(path)})")
+        return lines
+
     def run(
         self,
         name: str,
@@ -1023,6 +1126,7 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
         if json_output and "--json" not in clean_args:
             clean_args = ["--json", *clean_args]
         effective_timeout = max(1, min(timeout or self.runtime.run_timeout, 600))
+        artifact_snapshot = self._artifact_snapshot(cwd)
         try:
             result = subprocess.run(
                 [resolved, *clean_args],
@@ -1042,4 +1146,15 @@ Use the `run_cli_app` tool with `name="{name}"` for command execution. Do not in
             output.append("\nSTDOUT:\n" + result.stdout.rstrip())
         if result.stderr:
             output.append("\nSTDERR:\n" + result.stderr.rstrip())
+        artifacts = self._changed_artifacts(cwd, artifact_snapshot)
+        if artifacts:
+            output.append(
+                "\nArtifacts created or updated:\n"
+                + "\n".join(self._format_artifact_lines(cwd, artifacts))
+            )
+            if any(path.suffix.lower() in _INLINE_ARTIFACT_EXTENSIONS for path in artifacts):
+                output.append(
+                    "\nTo show a preview in WebUI, reference a raster artifact with Markdown "
+                    "using its workspace-relative path, for example `![diagram](diagram.png)`."
+                )
         return _truncate("\n".join(output))

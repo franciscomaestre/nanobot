@@ -926,6 +926,42 @@ describe("App layout", () => {
     expect(document.title).toBe("Apps · nanobot");
   });
 
+  it("opens Apps from the main sidebar without replacing the sidebar", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const href = String(input);
+        if (href === "/api/settings") {
+          return jsonResponse(baseSettingsPayload());
+        }
+        if (href === "/api/settings/cli-apps") {
+          return jsonResponse({ apps: [], installed_count: 0, catalog_updated_at: "2026-04-18" });
+        }
+        if (href === "/api/settings/mcp-presets") {
+          return jsonResponse({ presets: [], installed_count: 0 });
+        }
+        return { ok: false, status: 404, json: async () => ({}) } as Response;
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() => expect(connectSpy).toHaveBeenCalled());
+    const sidebar = screen.getByRole("navigation", { name: "Sidebar navigation" });
+    const appsButton = within(sidebar).getByRole("button", { name: "Apps" });
+
+    fireEvent.click(appsButton);
+
+    expect(await screen.findByRole("heading", { name: "Apps" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Sidebar navigation" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Settings sections" })).not.toBeInTheDocument();
+    expect(within(sidebar).getByRole("button", { name: "Apps" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(document.title).toBe("Apps · nanobot");
+  });
+
   it("returns from settings to the blank start page when no session was active", async () => {
     mockSessions = [
       {
