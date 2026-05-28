@@ -517,7 +517,6 @@ export interface SettingsUpdate {
   model?: string;
   provider?: string;
   modelPreset?: string | null;
-  contextWindowTokens?: number;
   timezone?: string;
   botName?: string;
   botIcon?: string;
@@ -536,7 +535,6 @@ export interface ModelConfigurationUpdate {
   label?: string;
   provider?: string;
   model?: string;
-  contextWindowTokens?: number;
 }
 
 export interface ProviderSettingsUpdate {

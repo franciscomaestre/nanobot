@@ -137,8 +137,7 @@
       "cliAppsFilter": "Filtro de apps CLI",
       "engine": "Motor",
       "logs": "Registros",
-      "diagnostics": "Diagnóstico",
-      "contextWindow": "Context window"
+      "diagnostics": "Diagnóstico"
     },
     "help": {
       "theme": "Cambia entre apariencia clara y oscura.",
@@ -176,8 +175,7 @@
       "logs": "Abre la carpeta de registros del motor de escritorio.",
       "diagnostics": "Exporta un pequeño informe de runtime para soporte.",
       "localServiceAccessNative": "Allow Full Access shell commands to reach services on this Mac.",
-      "webuiDefaultAccessNative": "Used by native chats without a project-specific permission.",
-      "contextWindow": "Choose the default context budget for this model configuration."
+      "webuiDefaultAccessNative": "Used by native chats without a project-specific permission."
     },
     "values": {
       "light": "Claro",

@@ -137,8 +137,7 @@
       "cliAppsFilter": "CLI アプリフィルター",
       "engine": "エンジン",
       "logs": "ログ",
-      "diagnostics": "診断",
-      "contextWindow": "Context window"
+      "diagnostics": "診断"
     },
     "help": {
       "theme": "ライト表示とダーク表示を切り替えます。",
@@ -176,8 +175,7 @@
       "logs": "Appエンジンのログフォルダを開きます。",
       "diagnostics": "サポート用の小さなランタイムレポートを書き出します。",
       "localServiceAccessNative": "Allow Full Access shell commands to reach services on this Mac.",
-      "webuiDefaultAccessNative": "Used by native chats without a project-specific permission.",
-      "contextWindow": "Choose the default context budget for this model configuration."
+      "webuiDefaultAccessNative": "Used by native chats without a project-specific permission."
     },
     "values": {
       "light": "ライト",
