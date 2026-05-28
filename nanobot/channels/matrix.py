@@ -12,6 +12,8 @@ from urllib.parse import quote, urlparse
 
 from pydantic import Field
 
+from nanobot.security.workspace_policy import is_path_within
+
 try:
     import aiohttp
     import nh3
@@ -352,11 +354,7 @@ class MatrixChannel(BaseChannel):
         """Check path is inside workspace (when restriction enabled)."""
         if not self._restrict_to_workspace or not self._workspace:
             return True
-        try:
-            path.resolve(strict=False).relative_to(self._workspace)
-            return True
-        except ValueError:
-            return False
+        return is_path_within(path, self._workspace)
 
     def _collect_outbound_media_candidates(self, media: list[str]) -> list[Path]:
         """Deduplicate and resolve outbound attachment paths."""
