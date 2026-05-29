@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import email.utils
+import hashlib
 import hmac
 import http
 import json
 import mimetypes
 import re
 import secrets
+import shutil
 import ssl
 import time
 import uuid
@@ -40,6 +44,7 @@ from nanobot.config.paths import get_media_dir, get_workspace_path
 from nanobot.config.schema import Base
 from nanobot.session.goal_state import goal_state_ws_blob
 from nanobot.session.webui_turns import websocket_turn_wall_started_at
+from nanobot.utils.helpers import safe_filename
 from nanobot.utils.media_decode import (
     FileSizeExceeded,
     save_base64_data_url,
@@ -64,11 +69,6 @@ from nanobot.webui.cli_apps_api import (
     cli_apps_action,
     cli_apps_payload,
     normalize_cli_app_mentions,
-)
-from nanobot.webui.media_api import (
-    serve_signed_media,
-    sign_media_path,
-    sign_or_stage_media_path,
 )
 from nanobot.webui.mcp_presets_api import (
     mcp_presets_settings_action,
@@ -514,6 +514,59 @@ def _is_websocket_upgrade(request: WsRequest) -> bool:
     return True
 
 
+def _b64url_encode(data: bytes) -> str:
+    """URL-safe base64 without padding — compact + friendly in URL paths."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(s: str) -> bytes:
+    """Reverse of :func:`_b64url_encode`; caller handles ``ValueError``."""
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+# Allowed MIME types we actually serve from the media endpoint. Anything
+# outside this set is degraded to ``application/octet-stream`` so an
+# attacker who somehow gets a signed URL for an unexpected file type can't
+# trick the browser into sniffing executable content.
+_MEDIA_ALLOWED_MIMES: frozenset[str] = frozenset({
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "video/mp4",
+    "video/webm",
+    "video/quicktime",
+})
+
+_BYTE_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def _parse_single_byte_range(range_header: str, size: int) -> tuple[int, int]:
+    """Parse a single HTTP byte range for signed media responses."""
+    if size <= 0 or "," in range_header:
+        raise ValueError("invalid byte range")
+    m = _BYTE_RANGE_RE.fullmatch(range_header.strip())
+    if m is None:
+        raise ValueError("invalid byte range")
+    start_text, end_text = m.groups()
+    if not start_text and not end_text:
+        raise ValueError("invalid byte range")
+    if not start_text:
+        suffix_length = int(end_text)
+        if suffix_length <= 0:
+            raise ValueError("invalid byte range")
+        start = max(size - suffix_length, 0)
+        end = size - 1
+    else:
+        start = int(start_text)
+        end = int(end_text) if end_text else size - 1
+        if start >= size or start > end:
+            raise ValueError("invalid byte range")
+        end = min(end, size - 1)
+    return start, end
+
+
 def _issue_route_secret_matches(headers: Any, configured_secret: str) -> bool:
     """Return True if the token-issue HTTP request carries credentials matching ``token_issue_secret``."""
     if not configured_secret:
@@ -730,64 +783,22 @@ class WebSocketChannel(BaseChannel):
         """Route an inbound HTTP request to a handler or to the WS upgrade path."""
         got, query = _parse_request_path(request.path)
 
+        # 1. Token issue endpoint (legacy, optional, gated by configured secret).
         if self.config.token_issue_path:
             issue_expected = _normalize_config_path(self.config.token_issue_path)
             if got == issue_expected:
                 return self._handle_token_issue_http(connection, request)
 
+        # 2. Bootstrap (`/webui/bootstrap`): mint WS/API tokens + shared session metadata.
         if got == "/webui/bootstrap":
             return self._handle_bootstrap(connection, request)
 
-        api_response = await self._dispatch_api_route(connection, request, got)
-        if api_response is not None:
-            return api_response
-
-        ws_matched, ws_response = self._dispatch_websocket_upgrade(
-            connection, request, got, query
-        )
-        if ws_matched:
-            return ws_response
-
-        # API clients should never receive the SPA shell for an unknown route.
-        # Returning HTML here makes the WebUI fail with "Unexpected token <"
-        # when a dev server is pointed at an older gateway.
-        if got.startswith("/api/"):
-            return _http_error(404, "API route not found")
-
-        if self._static_dist_path is not None:
-            response = self._serve_static(got)
-            if response is not None:
-                return response
-
-        return connection.respond(404, "Not Found")
-
-    async def _dispatch_api_route(
-        self,
-        connection: Any,
-        request: WsRequest,
-        got: str,
-    ) -> Any | None:
-        """Route REST-ish WebUI requests served beside the WebSocket endpoint."""
-        response = await self._dispatch_settings_api_route(request, got)
-        if response is not None:
-            return response
-        response = self._dispatch_session_api_route(request, got)
-        if response is not None:
-            return response
-        response = self._dispatch_media_api_route(request, got)
-        if response is not None:
-            return response
-        return self._dispatch_misc_api_route(connection, request, got)
-
-    def _dispatch_misc_api_route(
-        self,
-        connection: Any,
-        request: WsRequest,
-        got: str,
-    ) -> Response | None:
-        """Route small API endpoints that do not belong to a larger route group."""
+        # 3. REST handlers co-located with this channel (sessions, settings, …).
         if got == "/api/sessions":
             return self._handle_sessions_list(request)
+
+        if got == "/api/settings":
+            return self._handle_settings(request)
 
         if got == "/api/commands":
             return self._handle_commands(request)
@@ -800,16 +811,6 @@ class WebSocketChannel(BaseChannel):
 
         if got == "/api/webui/sidebar-state/update":
             return self._handle_webui_sidebar_state_update(request)
-
-        return None
-
-    async def _dispatch_settings_api_route(
-        self,
-        request: WsRequest,
-        got: str,
-    ) -> Response | None:
-        if got == "/api/settings":
-            return self._handle_settings(request)
 
         if got == "/api/settings/update":
             return self._handle_settings_update(request)
@@ -860,13 +861,6 @@ class WebSocketChannel(BaseChannel):
         if mcp_action is not None:
             return await self._handle_settings_mcp_presets(request, mcp_action)
 
-        return None
-
-    def _dispatch_session_api_route(
-        self,
-        request: WsRequest,
-        got: str,
-    ) -> Response | None:
         m = re.match(r"^/api/sessions/([^/]+)/messages$", got)
         if m:
             return self._handle_session_messages(request, m.group(1))
@@ -881,36 +875,40 @@ class WebSocketChannel(BaseChannel):
         if m:
             return self._handle_session_delete(request, m.group(1))
 
-        return None
-
-    def _dispatch_media_api_route(
-        self,
-        request: WsRequest,
-        got: str,
-    ) -> Response | None:
+        # Signed media fetch: ``<sig>`` is an HMAC over ``<payload>``; the
+        # payload decodes to a path inside :func:`get_media_dir`. See
+        # :meth:`_sign_media_path` for the inverse direction used to build
+        # these URLs when replaying a session.
         m = re.match(r"^/api/media/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)$", got)
         if m:
             return self._handle_media_fetch(m.group(1), m.group(2), request)
 
-        return None
-
-    def _dispatch_websocket_upgrade(
-        self,
-        connection: Any,
-        request: WsRequest,
-        got: str,
-        query: dict[str, list[str]],
-    ) -> tuple[bool, Any | None]:
-        """Authorize only real WS upgrade requests for the configured path."""
+        # 4. WebSocket upgrade (the channel's primary purpose). Only run the
+        # handshake gate on requests that actually ask to upgrade; otherwise
+        # a bare ``GET /`` from the browser would be rejected as an
+        # unauthorized WS handshake instead of serving the SPA's index.html.
         expected_ws = self._expected_path()
-        if got != expected_ws or not _is_websocket_upgrade(request):
-            return False, None
-        client_id = _query_first(query, "client_id") or ""
-        if len(client_id) > 128:
-            client_id = client_id[:128]
-        if not self.is_allowed(client_id):
-            return True, connection.respond(403, "Forbidden")
-        return True, self._authorize_websocket_handshake(connection, query)
+        if got == expected_ws and _is_websocket_upgrade(request):
+            client_id = _query_first(query, "client_id") or ""
+            if len(client_id) > 128:
+                client_id = client_id[:128]
+            if not self.is_allowed(client_id):
+                return connection.respond(403, "Forbidden")
+            return self._authorize_websocket_handshake(connection, query)
+
+        # API clients should never receive the SPA shell for an unknown route.
+        # Returning HTML here makes the WebUI fail with "Unexpected token <"
+        # when a dev server is pointed at an older gateway.
+        if got.startswith("/api/"):
+            return _http_error(404, "API route not found")
+
+        # 5. Static SPA serving (only if a build directory was wired in).
+        if self._static_dist_path is not None:
+            response = self._serve_static(got)
+            if response is not None:
+                return response
+
+        return connection.respond(404, "Not Found")
 
     # -- HTTP route handlers ------------------------------------------------
 
@@ -1219,8 +1217,6 @@ class WebSocketChannel(BaseChannel):
             self._with_settings_restart_state(payload, section="runtime")
         )
 
-    # -- Session replay, transcript, and signed media ----------------------
-
     @staticmethod
     def _is_websocket_channel_session_key(key: str) -> bool:
         """True when *key* is a ``websocket:…`` session exposed on this HTTP surface."""
@@ -1372,11 +1368,16 @@ class WebSocketChannel(BaseChannel):
         be fetched. The returned path is relative to the server origin; the
         client joins it against this server's HTTP origin (same host as WS).
         """
-        return sign_media_path(
-            abs_path,
-            secret=self._media_secret,
-            media_dir=lambda channel=None: get_media_dir(channel),
-        )
+        try:
+            media_root = get_media_dir().resolve()
+            rel = abs_path.resolve().relative_to(media_root)
+        except (OSError, ValueError):
+            return None
+        payload = _b64url_encode(rel.as_posix().encode("utf-8"))
+        mac = hmac.new(
+            self._media_secret, payload.encode("ascii"), hashlib.sha256
+        ).digest()[:16]
+        return f"/api/media/{_b64url_encode(mac)}/{payload}"
 
     def _sign_or_stage_media_path(self, path: Path) -> dict[str, str] | None:
         """Return a signed media URL payload for *path*.
@@ -1387,12 +1388,23 @@ class WebSocketChannel(BaseChannel):
         can fetch them through the existing signed media route without
         exposing arbitrary filesystem paths.
         """
-        return sign_or_stage_media_path(
-            path,
-            secret=self._media_secret,
-            media_dir=lambda channel=None: get_media_dir(channel),
-            logger=self.logger,
-        )
+        signed = self._sign_media_path(path)
+        if signed is not None:
+            return {"url": signed, "name": path.name}
+        try:
+            if not path.is_file():
+                return None
+            media_dir = get_media_dir("websocket")
+            safe_name = safe_filename(path.name) or "attachment"
+            staged = media_dir / f"{uuid.uuid4().hex[:12]}-{safe_name}"
+            shutil.copyfile(path, staged)
+        except OSError as exc:
+            self.logger.warning("failed to stage outbound media {}: {}", path, exc)
+            return None
+        signed = self._sign_media_path(staged)
+        if signed is None:
+            return None
+        return {"url": signed, "name": path.name}
 
     def _rewrite_local_markdown_images(self, text: str) -> str:
         return rewrite_local_markdown_images(
@@ -1409,12 +1421,86 @@ class WebSocketChannel(BaseChannel):
         payload to a relative path, and streams the file bytes with a
         long-lived immutable cache header (the URL already encodes the
         file identity, so caches can be aggressive)."""
-        return serve_signed_media(
-            sig,
-            payload,
-            secret=self._media_secret,
-            request=request,
-            media_dir=lambda channel=None: get_media_dir(channel),
+        try:
+            provided_mac = _b64url_decode(sig)
+        except (ValueError, binascii.Error):
+            return _http_error(401, "invalid signature")
+        expected_mac = hmac.new(
+            self._media_secret, payload.encode("ascii"), hashlib.sha256
+        ).digest()[:16]
+        if not hmac.compare_digest(expected_mac, provided_mac):
+            return _http_error(401, "invalid signature")
+        try:
+            rel_bytes = _b64url_decode(payload)
+            rel_str = rel_bytes.decode("utf-8")
+        except (ValueError, binascii.Error, UnicodeDecodeError):
+            return _http_error(400, "invalid payload")
+        # An attacker who somehow bypassed the HMAC check would still need
+        # the resolved path to escape the media root; guard defensively.
+        try:
+            media_root = get_media_dir().resolve()
+            candidate = (media_root / rel_str).resolve()
+            candidate.relative_to(media_root)
+        except (OSError, ValueError):
+            return _http_error(404, "not found")
+        if not candidate.is_file():
+            return _http_error(404, "not found")
+        mime, _ = mimetypes.guess_type(candidate.name)
+        if mime not in _MEDIA_ALLOWED_MIMES:
+            mime = "application/octet-stream"
+        common_headers = [
+            ("Accept-Ranges", "bytes"),
+            ("Cache-Control", "private, max-age=31536000, immutable"),
+            # Paired with the MIME whitelist above: prevents browsers from
+            # MIME-sniffing an octet-stream fallback into executable HTML.
+            ("X-Content-Type-Options", "nosniff"),
+        ]
+        try:
+            size = candidate.stat().st_size
+        except OSError:
+            return _http_error(500, "read error")
+
+        range_header = (
+            _case_insensitive_header(request.headers, "Range") if request else ""
+        )
+        if range_header:
+            try:
+                start, end = _parse_single_byte_range(range_header, size)
+            except ValueError:
+                return _http_response(
+                    b"range not satisfiable",
+                    status=416,
+                    extra_headers=[
+                        ("Accept-Ranges", "bytes"),
+                        ("Content-Range", f"bytes */{size}"),
+                        ("X-Content-Type-Options", "nosniff"),
+                    ],
+                )
+            try:
+                length = end - start + 1
+                with candidate.open("rb") as fh:
+                    fh.seek(start)
+                    body = fh.read(length)
+            except OSError:
+                return _http_error(500, "read error")
+            return _http_response(
+                body,
+                status=206,
+                content_type=mime,
+                extra_headers=[
+                    *common_headers,
+                    ("Content-Range", f"bytes {start}-{end}/{size}"),
+                ],
+            )
+
+        try:
+            body = candidate.read_bytes()
+        except OSError:
+            return _http_error(500, "read error")
+        return _http_response(
+            body,
+            content_type=mime,
+            extra_headers=common_headers,
         )
 
     def _handle_session_delete(self, request: WsRequest, key: str) -> Response:
@@ -1432,8 +1518,6 @@ class WebSocketChannel(BaseChannel):
         deleted = self._session_manager.delete_session(decoded_key)
         delete_webui_thread(decoded_key)
         return _http_json_response({"deleted": bool(deleted)})
-
-    # -- Static files and WebSocket handshake ------------------------------
 
     def _serve_static(self, request_path: str) -> Response | None:
         """Resolve *request_path* against the built SPA directory; SPA fallback to index.html."""
@@ -1498,8 +1582,6 @@ class WebSocketChannel(BaseChannel):
         if supplied:
             self._take_issued_token_if_valid(supplied)
         return None
-
-    # -- Server lifecycle and connection ingress ---------------------------
 
     async def start(self) -> None:
         from nanobot.utils.logging_bridge import redirect_lib_logging
@@ -1643,8 +1725,6 @@ class WebSocketChannel(BaseChannel):
             self.logger.debug("connection ended: {}", e)
         finally:
             self._cleanup_connection(connection)
-
-    # -- Inbound WebSocket envelopes ---------------------------------------
 
     def _save_envelope_media(
         self,
@@ -1874,8 +1954,6 @@ class WebSocketChannel(BaseChannel):
                 **({"chat_id": chat_id} if chat_id else {}),
             )
             return None
-
-    # -- Outbound WebSocket events -----------------------------------------
 
     async def stop(self) -> None:
         if not self._running:
