@@ -33,7 +33,8 @@ async function request<T>(
     credentials: "same-origin",
   });
   if (!res.ok) {
-    throw new ApiError(res.status, `HTTP ${res.status}`);
+    const text = typeof res.text === "function" ? (await res.text()).trim() : "";
+    throw new ApiError(res.status, text || `HTTP ${res.status}`);
   }
   return (await res.json()) as T;
 }
