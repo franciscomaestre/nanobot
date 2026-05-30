@@ -5,13 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from nanobot.utils.file_edit_events import (
+    StreamingFileEditTracker,
     build_file_edit_end_event,
     build_file_edit_start_event,
     line_diff_stats,
     prepare_file_edit_tracker,
     prepare_file_edit_trackers,
     read_file_snapshot,
-    StreamingFileEditTracker,
 )
 
 
@@ -86,43 +86,51 @@ def test_apply_patch_prepares_trackers_for_each_touched_file(tmp_path: Path) -> 
     (tmp_path / "src").mkdir()
     existing = tmp_path / "src" / "existing.py"
     existing.write_text("old\nkeep\n", encoding="utf-8")
-    delete_me = tmp_path / "src" / "delete_me.py"
-    delete_me.write_text("gone\n", encoding="utf-8")
 
-    patch = """*** Begin Patch
-*** Add File: src/new.py
-+fresh
-*** Update File: src/existing.py
-@@
--old
-+new
- keep
-*** Delete File: src/delete_me.py
-*** End Patch"""
+    edits = [
+        {"path": "src/new.py", "action": "add", "new_text": "fresh"},
+        {"path": "src/existing.py", "action": "replace", "old_text": "old", "new_text": "new"},
+    ]
 
     trackers = prepare_file_edit_trackers(
         call_id="call-patch",
         tool_name="apply_patch",
         tool=None,
         workspace=tmp_path,
-        params={"patch": patch},
+        params={"edits": edits},
     )
 
     assert [tracker.display_path for tracker in trackers] == [
         "src/new.py",
         "src/existing.py",
-        "src/delete_me.py",
     ]
 
     (tmp_path / "src" / "new.py").write_text("fresh\n", encoding="utf-8")
     existing.write_text("new\nkeep\n", encoding="utf-8")
-    delete_me.unlink()
 
-    events = [build_file_edit_end_event(tracker, {"patch": patch}) for tracker in trackers]
+    events = [build_file_edit_end_event(tracker, {"edits": edits}) for tracker in trackers]
     by_path = {event["path"]: event for event in events}
     assert (by_path["src/new.py"]["added"], by_path["src/new.py"]["deleted"]) == (1, 0)
     assert (by_path["src/existing.py"]["added"], by_path["src/existing.py"]["deleted"]) == (1, 1)
-    assert (by_path["src/delete_me.py"]["added"], by_path["src/delete_me.py"]["deleted"]) == (0, 1)
+
+
+def test_apply_patch_dry_run_does_not_prepare_file_edit_trackers(tmp_path: Path) -> None:
+    (tmp_path / "file.txt").write_text("old\n", encoding="utf-8")
+
+    trackers = prepare_file_edit_trackers(
+        call_id="call-patch",
+        tool_name="apply_patch",
+        tool=None,
+        workspace=tmp_path,
+        params={
+            "dry_run": True,
+            "edits": [
+                {"path": "file.txt", "action": "replace", "old_text": "old", "new_text": "new"}
+            ],
+        },
+    )
+
+    assert trackers == []
 
 
 def test_oversized_write_file_end_uses_known_content_for_exact_count(tmp_path: Path) -> None:
@@ -199,14 +207,8 @@ def test_streaming_apply_patch_tracker_emits_live_counts_per_file(tmp_path: Path
             "call_id": "call-patch",
             "name": "apply_patch",
             "arguments_delta": (
-                '{"patch":"*** Begin Patch\\n'
-                '*** Update File: src/existing.py\\n'
-                '@@\\n'
-                '-old\\n'
-                '+new\\n'
-                ' keep\\n'
-                '*** Add File: src/new.py\\n'
-                '+fresh\\n'
+                '{"edits":[{"path":"src/existing.py","action":"replace","old_text":"old","new_text":"new"}'
+                ',{"path":"src/new.py","action":"add","new_text":"fresh"}]}'
             ),
         })
 
@@ -233,9 +235,7 @@ def test_streaming_apply_patch_tracker_skips_dry_run(tmp_path: Path) -> None:
             "call_id": "call-patch",
             "name": "apply_patch",
             "arguments_delta": (
-                '{"dry_run":true,"patch":"*** Begin Patch\\n'
-                '*** Add File: dry.md\\n'
-                '+preview\\n'
+                '{"dry_run":true,"edits":[{"path":"dry.md","action":"add","new_text":"preview"}]}'
             ),
         })
 
@@ -408,6 +408,43 @@ def test_streaming_tracker_applies_canonical_call_id_to_final_tool(tmp_path: Pat
         )
         tracker.apply_final_call_ids([final])
         assert final.id == "idx:0"
+
+    asyncio.run(run())
+
+
+def test_streaming_tracker_does_not_restore_duplicate_canonical_ids(tmp_path: Path) -> None:
+    events: list[dict] = []
+
+    async def emit(batch: list[dict]) -> None:
+        events.extend(batch)
+
+    async def run() -> None:
+        tracker = StreamingFileEditTracker(workspace=tmp_path, tools={}, emit=emit)
+        await tracker.update({
+            "index": 0,
+            "call_id": "call_dup",
+            "name": "write_file",
+            "arguments_delta": '{"path":"a.md","content":"one\\n"}',
+        })
+        await tracker.update({
+            "index": 1,
+            "call_id": "call_dup",
+            "name": "write_file",
+            "arguments_delta": '{"path":"b.md","content":"two\\n"}',
+        })
+        final_a = SimpleNamespace(
+            id="call_dup",
+            name="write_file",
+            arguments={"path": "a.md", "content": "one\n"},
+        )
+        final_b = SimpleNamespace(
+            id="call_unique",
+            name="write_file",
+            arguments={"path": "b.md", "content": "two\n"},
+        )
+        tracker.apply_final_call_ids([final_a, final_b])
+        assert final_a.id == "call_dup"
+        assert final_b.id == "call_unique"
 
     asyncio.run(run())
 

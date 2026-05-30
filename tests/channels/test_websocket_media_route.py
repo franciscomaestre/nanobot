@@ -195,45 +195,6 @@ def test_local_markdown_image_rejects_workspace_escape(
     assert not (media / "websocket").exists()
 
 
-def test_local_markdown_image_is_staged_and_rewritten(
-    bus: MagicMock,
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "demo_arch.png").write_bytes(_PNG_BYTES)
-    media = tmp_path / "media"
-    channel = _ch(bus, workspace_path=workspace, port=0)
-
-    with patch("nanobot.channels.websocket.get_media_dir", side_effect=_fake_media_dir(media)):
-        rewritten = channel._rewrite_local_markdown_images(
-            "The result:\n![Cloud Architecture Diagram](demo_arch.png)"
-        )
-
-    assert "![Cloud Architecture Diagram](/api/media/" in rewritten
-    staged = list((media / "websocket").iterdir())
-    assert len(staged) == 1
-    assert staged[0].read_bytes() == _PNG_BYTES
-
-
-def test_local_markdown_image_rejects_workspace_escape(
-    bus: MagicMock,
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    outside = tmp_path / "outside.png"
-    outside.write_bytes(_PNG_BYTES)
-    media = tmp_path / "media"
-    channel = _ch(bus, workspace_path=workspace, port=0)
-    text = "![nope](../outside.png)"
-
-    with patch("nanobot.channels.websocket.get_media_dir", side_effect=_fake_media_dir(media)):
-        assert channel._rewrite_local_markdown_images(text) == text
-
-    assert not (media / "websocket").exists()
-
-
 # ---------------------------------------------------------------------------
 # /api/media/<sig>/<payload>: the serving handler
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Structured patch editing tool for coding workflows."""
+"""Apply file edits by providing structured edit instructions."""
 
 from __future__ import annotations
 
@@ -6,29 +6,25 @@ import difflib
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from nanobot.agent.tools.base import tool_parameters
 from nanobot.agent.tools.filesystem import _FsTool
-from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
-
-
-PatchKind = Literal["add", "delete", "update"]
-
-
-@dataclass(slots=True)
-class _Hunk:
-    header: str | None
-    lines: list[tuple[str, str]]
+from nanobot.agent.tools.schema import (
+    ArraySchema,
+    BooleanSchema,
+    ObjectSchema,
+    StringSchema,
+    tool_parameters_schema,
+)
 
 
 @dataclass(slots=True)
-class _PatchOp:
-    kind: PatchKind
+class _PatchSummary:
+    action: str
     path: str
-    new_path: str | None = None
-    add_lines: list[str] | None = None
-    hunks: list[_Hunk] | None = None
+    added: int = 0
+    deleted: int = 0
 
 
 class _PatchError(ValueError):
@@ -36,14 +32,6 @@ class _PatchError(ValueError):
 
 
 _ABSOLUTE_WINDOWS_RE = re.compile(r"^[A-Za-z]:[\\/]")
-
-
-def _is_file_header(line: str) -> bool:
-    return (
-        line.startswith("*** Add File: ")
-        or line.startswith("*** Delete File: ")
-        or line.startswith("*** Update File: ")
-    )
 
 
 def _validate_relative_path(path: str) -> str:
@@ -65,183 +53,67 @@ def _lines_to_text(lines: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _parse_patch(patch: str) -> list[_PatchOp]:
-    lines = patch.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
-    if not lines or lines[0] != "*** Begin Patch":
-        raise _PatchError("patch must start with '*** Begin Patch'")
-    if len(lines) < 2 or lines[-1] != "*** End Patch":
-        raise _PatchError("patch must end with '*** End Patch'")
-
-    ops: list[_PatchOp] = []
-    i = 1
-    end = len(lines) - 1
-    while i < end:
-        line = lines[i]
-        if line.startswith("*** Add File: "):
-            path = _validate_relative_path(line.removeprefix("*** Add File: "))
-            i += 1
-            add_lines: list[str] = []
-            while i < end and not _is_file_header(lines[i]):
-                if not lines[i].startswith("+"):
-                    raise _PatchError(f"Add File lines must start with '+': {lines[i]!r}")
-                add_lines.append(lines[i][1:])
-                i += 1
-            ops.append(_PatchOp(kind="add", path=path, add_lines=add_lines))
-            continue
-
-        if line.startswith("*** Delete File: "):
-            path = _validate_relative_path(line.removeprefix("*** Delete File: "))
-            ops.append(_PatchOp(kind="delete", path=path))
-            i += 1
-            continue
-
-        if line.startswith("*** Update File: "):
-            path = _validate_relative_path(line.removeprefix("*** Update File: "))
-            i += 1
-            new_path: str | None = None
-            if i < end and lines[i].startswith("*** Move to: "):
-                new_path = _validate_relative_path(lines[i].removeprefix("*** Move to: "))
-                i += 1
-
-            hunks: list[_Hunk] = []
-            while i < end and not _is_file_header(lines[i]):
-                if not lines[i].startswith("@@"):
-                    raise _PatchError(f"Update File sections require '@@' hunks: {lines[i]!r}")
-                header = lines[i][2:].strip() or None
-                i += 1
-                hunk_lines: list[tuple[str, str]] = []
-                while i < end and not lines[i].startswith("@@") and not _is_file_header(lines[i]):
-                    if lines[i] == "*** End of File":
-                        i += 1
-                        break
-                    if lines[i] == r"\ No newline at end of file":
-                        i += 1
-                        continue
-                    if not lines[i] or lines[i][0] not in {" ", "+", "-"}:
-                        raise _PatchError(f"Hunk lines must start with ' ', '+', or '-': {lines[i]!r}")
-                    hunk_lines.append((lines[i][0], lines[i][1:]))
-                    i += 1
-                if not hunk_lines:
-                    raise _PatchError(f"Update File hunk is empty: {path}")
-                hunks.append(_Hunk(header=header, lines=hunk_lines))
-            if not hunks and new_path is None:
-                raise _PatchError(f"Update File requires at least one hunk or Move to: {path}")
-            ops.append(_PatchOp(kind="update", path=path, new_path=new_path, hunks=hunks))
-            continue
-
-        raise _PatchError(f"unknown patch header: {line!r}")
-
-    if not ops:
-        raise _PatchError("patch contains no file operations")
-    return ops
-
-
-def _find_with_eof_fallback(content: str, needle: str, start: int) -> tuple[int, int]:
-    pos = content.find(needle, start)
-    if pos >= 0:
-        return pos, len(needle)
-    if needle.endswith("\n"):
-        trimmed = needle[:-1]
-        pos = content.find(trimmed, start)
-        if pos >= 0 and pos + len(trimmed) == len(content):
-            return pos, len(trimmed)
-    return -1, 0
-
-
-def _line_offset(content: str, line_number: int) -> int:
-    if line_number <= 1:
+def _text_line_count(text: str) -> int:
+    if not text:
         return 0
-    offset = 0
-    for current, line in enumerate(content.splitlines(keepends=True), start=1):
-        if current >= line_number:
-            return offset
-        offset += len(line)
-    return len(content)
+    return len(text.splitlines())
 
 
-def _line_hint(header: str | None) -> int | None:
-    if not header:
-        return None
-    match = re.search(r"-(\d+)(?:,\d+)?", header)
-    return int(match.group(1)) if match else None
+def _line_diff_stats(before: str, after: str) -> tuple[int, int]:
+    before_lines = before.replace("\r\n", "\n").splitlines()
+    after_lines = after.replace("\r\n", "\n").splitlines()
+    added = 0
+    deleted = 0
+    matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag in ("replace", "delete"):
+            deleted += i2 - i1
+        if tag in ("replace", "insert"):
+            added += j2 - j1
+    return added, deleted
 
 
-def _hunk_mismatch(path: str, old_text: str, content: str, header: str | None) -> str:
-    lines = content.splitlines(keepends=True)
-    old_lines = old_text.splitlines(keepends=True)
-    window = max(1, len(old_lines))
-    best_ratio, best_start = -1.0, 0
-    best_lines: list[str] = []
-    for i in range(max(1, len(lines) - window + 1)):
-        current = lines[i : i + window]
-        ratio = difflib.SequenceMatcher(None, "".join(old_lines), "".join(current)).ratio()
-        if ratio > best_ratio:
-            best_ratio, best_start, best_lines = ratio, i, current
-
-    label = f" after header {header!r}" if header else ""
-    if best_ratio <= 0:
-        return f"hunk does not match {path}{label}"
-    diff = "\n".join(difflib.unified_diff(
-        old_lines,
-        best_lines,
-        fromfile="patch hunk",
-        tofile=f"{path} (actual, line {best_start + 1})",
-        lineterm="",
-    ))
-    return (
-        f"hunk does not match {path}{label}. "
-        f"Best match ({best_ratio:.0%} similar) at line {best_start + 1}:\n{diff}"
-    )
-
-
-def _apply_hunks(path: str, content: str, hunks: list[_Hunk]) -> str:
-    cursor = 0
-    for hunk in hunks:
-        old_lines = [text for marker, text in hunk.lines if marker in {" ", "-"}]
-        new_lines = [text for marker, text in hunk.lines if marker in {" ", "+"}]
-        old_text = _lines_to_text(old_lines)
-        new_text = _lines_to_text(new_lines)
-
-        search_start = cursor
-        line_hint = None
-        if hunk.header:
-            line_hint = _line_hint(hunk.header)
-            if line_hint is not None:
-                search_start = _line_offset(content, line_hint)
-            else:
-                header_pos = content.find(hunk.header, cursor)
-                if header_pos >= 0:
-                    search_start = header_pos
-
-        if old_text:
-            pos, match_len = _find_with_eof_fallback(content, old_text, search_start)
-            if pos < 0 and search_start != 0 and line_hint is None:
-                pos, match_len = _find_with_eof_fallback(content, old_text, 0)
-            if pos < 0:
-                raise _PatchError(_hunk_mismatch(path, old_text, content, hunk.header))
-        else:
-            pos = search_start
-            match_len = 0
-
-        content = content[:pos] + new_text + content[pos + match_len:]
-        cursor = pos + len(new_text)
-    return content
+def _format_summary(summary: _PatchSummary) -> str:
+    stats = ""
+    if summary.added or summary.deleted:
+        stats = f" (+{summary.added}/-{summary.deleted})"
+    return f"- {summary.action} {summary.path}{stats}"
 
 
 @tool_parameters(
     tool_parameters_schema(
-        patch=StringSchema(
-            "Full patch text. Use *** Begin Patch / *** End Patch and file sections "
-            "for Add File, Update File, Delete File, and optional Move to.",
-            min_length=1,
+        edits=ArraySchema(
+            items=ObjectSchema(
+                path=StringSchema("Relative path to the file to edit."),
+                action=StringSchema(
+                    "Operation type: replace or add.",
+                    enum=["replace", "add"],
+                ),
+                old_text=StringSchema(
+                    "Exact text to search for in the file. Required for replace.",
+                    nullable=True,
+                ),
+                new_text=StringSchema(
+                    "Text to replace with or append. Required for replace and add.",
+                    nullable=True,
+                ),
+                required=["path", "action"],
+            ),
+            description="List of edits to apply. Each edit specifies a file and the change to make.",
+            min_items=1,
+            max_items=20,
         ),
-        required=["patch"],
+        dry_run=BooleanSchema(
+            description="Validate and summarize the patch without writing files.",
+            default=False,
+        ),
+        required=["edits"],
     )
 )
 class ApplyPatchTool(_FsTool):
-    """Apply a structured multi-file patch."""
+    """Apply file edits by providing structured edit instructions."""
     _scopes = {"core", "subagent"}
 
     @property
@@ -251,72 +123,147 @@ class ApplyPatchTool(_FsTool):
     @property
     def description(self) -> str:
         return (
-            "Apply a structured patch for code edits. The patch must include "
-            "*** Begin Patch and *** End Patch. Supports Add File, Update File, "
-            "Delete File, and Move to. Paths must be relative. Prefer this for "
-            "multi-file coding changes; use edit_file for small exact replacements."
+            "Default tool for code edits. Supports multi-file changes in a single call. "
+            "Provide a list of structured edits, each specifying a file path, action "
+            "(replace/add), and the exact text to change. "
+            "Paths must be relative. Set dry_run=true to validate and preview without writing files. "
+            "Use edit_file only for small exact replacements on a single file."
         )
 
-    async def execute(self, patch: str, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        edits: list[dict] | None = None,
+        dry_run: bool = False,
+        **kwargs: Any,
+    ) -> str:
         try:
-            ops = _parse_patch(patch)
+            if not edits:
+                raise _PatchError("must provide edits")
+
             writes: dict[Path, str] = {}
-            deletes: set[Path] = set()
-            touched: list[str] = []
+            summaries: list[_PatchSummary] = []
 
-            for op in ops:
-                source = self._resolve(op.path)
-                if op.kind == "add":
-                    if source.exists():
-                        raise _PatchError(f"file to add already exists: {op.path}")
-                    writes[source] = _lines_to_text(op.add_lines or [])
-                    deletes.discard(source)
-                    touched.append(f"add {op.path}")
-                    continue
+            for edit in edits:
+                if not isinstance(edit, dict):
+                    raise _PatchError("each edit must be an object")
+                raw_path = edit.get("path")
+                if not isinstance(raw_path, str):
+                    raise _PatchError("path required for edit")
+                path = _validate_relative_path(raw_path)
+                action = edit.get("action")
+                if not isinstance(action, str):
+                    raise _PatchError(f"action required for edit: {path}")
+                source = self._resolve(path)
 
-                if op.kind == "delete":
-                    if not source.exists():
-                        raise _PatchError(f"file to delete does not exist: {op.path}")
-                    if not source.is_file():
-                        raise _PatchError(f"path to delete is not a file: {op.path}")
-                    deletes.add(source)
-                    writes.pop(source, None)
-                    touched.append(f"delete {op.path}")
-                    continue
+                if action == "add":
+                    new_text = edit.get("new_text")
+                    if new_text is None:
+                        raise _PatchError(f"new_text required for add: {path}")
 
-                if not source.exists():
-                    raise _PatchError(f"file to update does not exist: {op.path}")
-                if not source.is_file():
-                    raise _PatchError(f"path to update is not a file: {op.path}")
-                raw = source.read_bytes()
-                try:
-                    content = raw.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise _PatchError(f"file to update is not UTF-8 text: {op.path}") from exc
-                uses_crlf = "\r\n" in content
-                content = content.replace("\r\n", "\n")
-                new_content = _apply_hunks(op.path, content, op.hunks or [])
-                if uses_crlf:
-                    new_content = new_content.replace("\n", "\r\n")
+                    pending = writes.get(source)
+                    if pending is not None:
+                        content = pending
+                        exists = True
+                    elif source.exists():
+                        raw = source.read_bytes()
+                        try:
+                            content = raw.decode("utf-8")
+                        except UnicodeDecodeError:
+                            raise _PatchError(f"file is not UTF-8 text: {path}")
+                        exists = True
+                    else:
+                        content = ""
+                        exists = False
 
-                target = self._resolve(op.new_path) if op.new_path else source
-                if op.new_path and target.exists() and target != source:
-                    raise _PatchError(f"move target already exists: {op.new_path}")
-                writes[target] = new_content
-                deletes.discard(target)
-                if target != source:
-                    deletes.add(source)
-                action = f"move {op.path} -> {op.new_path}" if op.new_path else f"update {op.path}"
-                touched.append(action)
+                    if exists:
+                        uses_crlf = "\r\n" in content
+                        new_norm = content.replace("\r\n", "\n") + new_text.replace("\r\n", "\n")
+                        if new_norm and not new_norm.endswith("\n"):
+                            new_norm += "\n"
+                        if uses_crlf:
+                            new_norm = new_norm.replace("\n", "\r\n")
+                        writes[source] = new_norm
+                        added, deleted = _line_diff_stats(content, new_norm)
+                        action_name = "update"
+                    else:
+                        new_norm = new_text.replace("\r\n", "\n")
+                        if new_norm and not new_norm.endswith("\n"):
+                            new_norm += "\n"
+                        writes[source] = new_norm
+                        added = _text_line_count(new_norm)
+                        deleted = 0
+                        action_name = "add"
+
+                    summaries.append(
+                        _PatchSummary(
+                            action=action_name, path=path, added=added, deleted=deleted
+                        )
+                    )
+
+                elif action == "replace":
+                    old_text = edit.get("old_text") or ""
+                    if not old_text:
+                        raise _PatchError(f"old_text required for replace: {path}")
+                    new_text = edit.get("new_text")
+                    if new_text is None:
+                        raise _PatchError(f"new_text required for replace: {path}")
+
+                    pending = writes.get(source)
+                    if pending is not None:
+                        content = pending
+                    elif source.exists():
+                        raw = source.read_bytes()
+                        try:
+                            content = raw.decode("utf-8")
+                        except UnicodeDecodeError:
+                            raise _PatchError(f"file is not UTF-8 text: {path}")
+                    else:
+                        raise _PatchError(f"file to update does not exist: {path}")
+
+                    if pending is None and not source.is_file():
+                        raise _PatchError(f"path to update is not a file: {path}")
+
+                    uses_crlf = "\r\n" in content
+                    norm_content = content.replace("\r\n", "\n")
+                    norm_old = old_text.replace("\r\n", "\n")
+
+                    pos = norm_content.find(norm_old)
+                    if pos < 0:
+                        raise _PatchError(f"old_text not found in {path}")
+                    if norm_content.find(norm_old, pos + 1) >= 0:
+                        raise _PatchError(f"old_text appears multiple times in {path}")
+
+                    new_norm = (
+                        norm_content[:pos]
+                        + new_text.replace("\r\n", "\n")
+                        + norm_content[pos + len(norm_old) :]
+                    )
+                    if new_norm and not new_norm.endswith("\n"):
+                        new_norm += "\n"
+                    if uses_crlf:
+                        new_norm = new_norm.replace("\n", "\r\n")
+
+                    writes[source] = new_norm
+                    added, deleted = _line_diff_stats(content, new_norm)
+                    summaries.append(
+                        _PatchSummary(
+                            action="update", path=path, added=added, deleted=deleted
+                        )
+                    )
+
+                else:
+                    raise _PatchError(f"unknown action: {action}")
+
+            if dry_run:
+                return "Patch dry-run succeeded:\n" + "\n".join(
+                    _format_summary(summary) for summary in summaries
+                )
 
             backups: dict[Path, bytes | None] = {}
-            for path in set(writes) | deletes:
+            for path in writes:
                 backups[path] = path.read_bytes() if path.exists() else None
 
             try:
-                for path in deletes:
-                    if path.exists():
-                        path.unlink()
                 for path, content in writes.items():
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content, encoding="utf-8", newline="")
@@ -330,9 +277,11 @@ class ApplyPatchTool(_FsTool):
                         path.write_bytes(data)
                 raise
 
-            for path in set(writes) | deletes:
+            for path in writes:
                 self._file_states.record_write(path)
-            return "Patch applied:\n" + "\n".join(f"- {item}" for item in touched)
+            return "Patch applied:\n" + "\n".join(
+                _format_summary(summary) for summary in summaries
+            )
         except PermissionError as exc:
             return f"Error: {exc}"
         except _PatchError as exc:

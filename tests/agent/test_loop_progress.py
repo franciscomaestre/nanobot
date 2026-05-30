@@ -6,10 +6,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import nanobot.agent.runner as runner_module
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMResponse, ToolCallRequest
+from nanobot.utils.progress_events import (
+    invoke_file_edit_progress,
+    on_progress_accepts_file_edit_events,
+)
 
 
 def _make_loop(tmp_path: Path) -> AgentLoop:
@@ -140,6 +145,52 @@ class TestToolEventProgress:
         assert (file_events[1]["added"], file_events[1]["deleted"]) == (2, 1)
 
     @pytest.mark.asyncio
+    async def test_file_edit_snapshot_skipped_when_progress_callback_cannot_emit_file_edits(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        loop = _make_loop(tmp_path)
+        target = tmp_path / "foo.txt"
+        target.write_text("old\n", encoding="utf-8")
+        tool_call = ToolCallRequest(
+            id="call-write",
+            name="write_file",
+            arguments={"path": "foo.txt", "content": "new\n"},
+        )
+        calls = iter([
+            LLMResponse(content="", tool_calls=[tool_call]),
+            LLMResponse(content="Done", tool_calls=[]),
+        ])
+        loop.provider.chat_with_retry = AsyncMock(side_effect=lambda *a, **kw: next(calls))
+        loop.tools.get_definitions = MagicMock(return_value=[])
+        loop.tools.prepare_call = MagicMock(
+            return_value=(None, {"path": "foo.txt", "content": "new\n"}, None),
+        )
+
+        async def execute(name: str, params: dict) -> str:
+            target.write_text(params["content"], encoding="utf-8")
+            return "ok"
+
+        loop.tools.execute = AsyncMock(side_effect=execute)
+        prepare_tracker = MagicMock(side_effect=AssertionError("unexpected file snapshot"))
+        monkeypatch.setattr(runner_module, "prepare_file_edit_tracker", prepare_tracker)
+
+        async def on_progress(
+            content: str,
+            *,
+            tool_hint: bool = False,
+            tool_events: list[dict] | None = None,
+        ) -> None:
+            pass
+
+        final_content, _, _, _, _ = await loop._run_agent_loop([], on_progress=on_progress)
+
+        assert final_content == "Done"
+        assert target.read_text(encoding="utf-8") == "new\n"
+        prepare_tracker.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_exec_does_not_emit_file_edit_progress(self, tmp_path: Path) -> None:
         loop = _make_loop(tmp_path)
         tool_call = ToolCallRequest(
@@ -244,6 +295,7 @@ class TestToolEventProgress:
             chat_id="chat1",
             content="edit",
         ))
+        assert on_progress_accepts_file_edit_events(websocket_progress) is True
         await websocket_progress("", file_edit_events=edit_events)
         outbound = await bus.consume_outbound()
         assert outbound.metadata["_file_edit_events"] == edit_events
@@ -254,8 +306,103 @@ class TestToolEventProgress:
             chat_id="chat2",
             content="edit",
         ))
-        await telegram_progress("", file_edit_events=edit_events)
+        assert on_progress_accepts_file_edit_events(telegram_progress) is False
+        await invoke_file_edit_progress(telegram_progress, edit_events)
         assert bus.outbound_size == 0
+
+    @pytest.mark.asyncio
+    async def test_goal_turn_keeps_live_file_edit_progress_for_webui(self, tmp_path: Path) -> None:
+        """The /goal command rewrites the prompt but must not bypass WebUI file-edit progress."""
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.supports_progress_deltas = True
+        provider.get_default_model.return_value = "test-model"
+        call_count = 0
+        target = tmp_path / "goal.txt"
+
+        async def chat_stream_with_retry(*, on_tool_call_delta=None, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                assert on_tool_call_delta is not None
+                await on_tool_call_delta({
+                    "index": 0,
+                    "call_id": "call-goal-write",
+                    "name": "write_file",
+                    "arguments_delta": '{"path":"goal.txt","content":"',
+                })
+                await on_tool_call_delta({
+                    "index": 0,
+                    "arguments_delta": "one\\ntwo\\nthree\\n",
+                })
+                await on_tool_call_delta({"index": 0, "arguments_delta": '"}'})
+                return LLMResponse(
+                    content=None,
+                    tool_calls=[
+                        ToolCallRequest(
+                            id="call-goal-write",
+                            name="write_file",
+                            arguments={
+                                "path": "goal.txt",
+                                "content": "one\ntwo\nthree\n",
+                            },
+                        )
+                    ],
+                    usage={},
+                )
+            return LLMResponse(content="Done", tool_calls=[], usage={})
+
+        async def execute(name: str, params: dict) -> str:
+            assert name == "write_file"
+            target.write_text(params["content"], encoding="utf-8")
+            return "ok"
+
+        provider.chat_stream_with_retry = chat_stream_with_retry
+        provider.chat_with_retry = AsyncMock()
+        loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model")
+        loop.tools.get_definitions = MagicMock(return_value=[
+            {"type": "function", "function": {"name": "write_file"}},
+        ])
+        loop.tools.prepare_call = MagicMock(
+            return_value=(
+                None,
+                {"path": "goal.txt", "content": "one\ntwo\nthree\n"},
+                None,
+            ),
+        )
+        loop.tools.execute = AsyncMock(side_effect=execute)
+        loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+        await loop._dispatch(InboundMessage(
+            channel="websocket",
+            sender_id="u1",
+            chat_id="chat1",
+            content="/goal create goal file",
+            metadata={"_wants_stream": True},
+        ))
+
+        outbound = []
+        while bus.outbound_size > 0:
+            outbound.append(await bus.consume_outbound())
+
+        edit_events = [
+            event
+            for msg in outbound
+            for event in msg.metadata.get("_file_edit_events", [])
+        ]
+        assert any(
+            event["status"] == "editing"
+            and event["approximate"]
+            and event["added"] == 3
+            for event in edit_events
+        )
+        assert any(
+            event["status"] == "done"
+            and not event["approximate"]
+            and event["added"] == 3
+            for event in edit_events
+        )
+        provider.chat_with_retry.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_non_streaming_channel_does_not_publish_codex_progress_deltas(
@@ -504,7 +651,7 @@ class TestToolEventProgress:
             return False
 
         monkeypatch.setattr(
-            "nanobot.utils.webui_turn_helpers.maybe_generate_webui_title_after_turn",
+            "nanobot.session.webui_turns.maybe_generate_webui_title_after_turn",
             fake_title_after_turn,
         )
         scheduled_title: list[object] = []
@@ -551,7 +698,7 @@ class TestToolEventProgress:
             raise AssertionError("command-only turns should not generate titles")
 
         monkeypatch.setattr(
-            "nanobot.utils.webui_turn_helpers.maybe_generate_webui_title_after_turn",
+            "nanobot.session.webui_turns.maybe_generate_webui_title_after_turn",
             fake_title_after_turn,
         )
         scheduled: list[object] = []
