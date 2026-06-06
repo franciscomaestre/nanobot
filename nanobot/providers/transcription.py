@@ -1,4 +1,4 @@
-"""Voice transcription providers (Groq and OpenAI Whisper)."""
+"""Voice transcription providers (Groq, OpenAI Whisper, and AssemblyAI)."""
 
 import asyncio
 import os
@@ -219,3 +219,59 @@ class GroqTranscriptionProvider:
             provider_label="Groq",
             language=self.language,
         )
+
+
+class AssemblyAITranscriptionProvider:
+    """
+    Voice transcription provider using AssemblyAI.
+
+    Requires: pip install assemblyai
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        language: str | None = None,
+    ):
+        self.api_key = api_key or os.environ.get("ASSEMBLYAI_API_KEY")
+        self.language = language or None
+
+    async def transcribe(self, file_path: str | Path) -> str:
+        """Transcribe an audio file using AssemblyAI."""
+        if not self.api_key:
+            logger.warning("AssemblyAI API key not configured for transcription")
+            return ""
+
+        path = Path(file_path)
+        if not path.exists():
+            logger.error("Audio file not found: {}", file_path)
+            return ""
+
+        try:
+            return await asyncio.get_event_loop().run_in_executor(
+                None, self._transcribe_sync, path
+            )
+        except Exception as e:
+            logger.exception("AssemblyAI transcription error: {}", e)
+            return ""
+
+    def _transcribe_sync(self, path: Path) -> str:
+        """Synchronous transcription using AssemblyAI SDK."""
+        try:
+            import assemblyai as aai
+        except ImportError:
+            logger.error("assemblyai package not installed. Run: pip install assemblyai")
+            return ""
+
+        aai.settings.api_key = self.api_key
+        config = aai.TranscriptionConfig(
+            language_code=self.language or "es",
+        )
+        transcriber = aai.Transcriber()
+        transcript = transcriber.transcribe(str(path), config=config)
+
+        if transcript.status == aai.TranscriptStatus.error:
+            logger.error("AssemblyAI error: {}", transcript.error)
+            return ""
+
+        return transcript.text or ""
