@@ -37,6 +37,32 @@ def _sanitize_tool_id(tool_id: str) -> str:
     return sanitized if sanitized else _gen_tool_id()
 
 
+def _sanitize_all_tool_ids(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Final defensive pass: sanitize every tool_use/tool_result ID in messages.
+
+    This catches any IDs that slipped through individual conversion methods,
+    e.g. from session restoration, merge of consecutive messages, or content
+    blocks that were already in Anthropic format.
+    """
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for i, block in enumerate(content):
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "tool_use" and "id" in block:
+                raw_id = block["id"]
+                if not _VALID_ID_RE.match(raw_id):
+                    msg["content"][i] = {**block, "id": _sanitize_tool_id(raw_id)}
+            elif btype == "tool_result" and "tool_use_id" in block:
+                raw_id = block["tool_use_id"]
+                if not _VALID_ID_RE.match(raw_id):
+                    msg["content"][i] = {**block, "tool_use_id": _sanitize_tool_id(raw_id)}
+    return messages
+
+
 class AnthropicProvider(LLMProvider):
     """LLM provider using the native Anthropic SDK for Claude models.
 
@@ -468,6 +494,7 @@ class AnthropicProvider(LLMProvider):
     ) -> dict[str, Any]:
         model_name = self._strip_prefix(model or self.default_model)
         system, anthropic_msgs = self._convert_messages(self._sanitize_empty_content(messages))
+        anthropic_msgs = _sanitize_all_tool_ids(anthropic_msgs)
         anthropic_tools = self._convert_tools(tools)
 
         if supports_caching:
