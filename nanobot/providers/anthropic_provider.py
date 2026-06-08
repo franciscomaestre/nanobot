@@ -15,10 +15,26 @@ import json_repair
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 _ALNUM = string.ascii_letters + string.digits
+_VALID_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 def _gen_tool_id() -> str:
     return "toolu_" + "".join(secrets.choice(_ALNUM) for _ in range(22))
+
+
+def _sanitize_tool_id(tool_id: str) -> str:
+    """Ensure tool_use / tool_result IDs match Anthropic's pattern ^[a-zA-Z0-9_-]+$.
+
+    IDs from other providers (e.g. OpenAI Responses API) may contain dots or
+    other characters that Anthropic rejects.  Replace invalid chars with '_'.
+    If the result is empty, generate a fresh ID.
+    """
+    if not tool_id:
+        return _gen_tool_id()
+    if _VALID_ID_RE.match(tool_id):
+        return tool_id
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id)
+    return sanitized if sanitized else _gen_tool_id()
 
 
 class AnthropicProvider(LLMProvider):
@@ -173,7 +189,7 @@ class AnthropicProvider(LLMProvider):
         content = msg.get("content")
         block: dict[str, Any] = {
             "type": "tool_result",
-            "tool_use_id": msg.get("tool_call_id", ""),
+            "tool_use_id": _sanitize_tool_id(msg.get("tool_call_id", "")),
         }
         if isinstance(content, list):
             block["content"] = AnthropicProvider._convert_user_content(content)
@@ -200,7 +216,14 @@ class AnthropicProvider(LLMProvider):
             blocks.append({"type": "text", "text": content})
         elif isinstance(content, list):
             for item in content:
-                blocks.append(item if isinstance(item, dict) else {"type": "text", "text": str(item)})
+                if isinstance(item, dict):
+                    # Sanitize tool_use IDs that may have been stored with
+                    # invalid characters (e.g. from OpenAI Responses API).
+                    if item.get("type") == "tool_use" and "id" in item:
+                        item = {**item, "id": _sanitize_tool_id(item["id"])}
+                    blocks.append(item)
+                else:
+                    blocks.append({"type": "text", "text": str(item)})
 
         for tc in msg.get("tool_calls") or []:
             if not isinstance(tc, dict):
@@ -211,7 +234,7 @@ class AnthropicProvider(LLMProvider):
                 args = json_repair.loads(args)
             blocks.append({
                 "type": "tool_use",
-                "id": tc.get("id") or _gen_tool_id(),
+                "id": _sanitize_tool_id(tc.get("id") or _gen_tool_id()),
                 "name": func.get("name", ""),
                 "input": args,
             })
@@ -243,6 +266,10 @@ class AnthropicProvider(LLMProvider):
                 # the API rejects with "content.0.type: Field required".
                 result.append({"type": "text", "text": str(item)})
                 continue
+            # Sanitize tool_result IDs that may have been stored with
+            # invalid characters (e.g. from OpenAI Responses API).
+            if item.get("type") == "tool_result" and "tool_use_id" in item:
+                item = {**item, "tool_use_id": _sanitize_tool_id(item["tool_use_id"])}
             result.append(item)
         return result or "(empty)"
 
