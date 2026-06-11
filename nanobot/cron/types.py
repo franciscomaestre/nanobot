@@ -32,6 +32,8 @@ class CronPayload:
     origin_channel: str | None = None
     origin_chat_id: str | None = None
     origin_metadata: dict[str, Any] = field(default_factory=dict)
+    silent: bool = False  # If True, run the agent but don't auto-deliver the response
+    lock_recipient: str | None = None  # Fixed chat_id for the job (overrides 'to')
 
 
 @dataclass

@@ -251,6 +251,8 @@ class CronService:
                                 or j["payload"].get("origin_metadata")
                                 or {}
                             ),
+                            silent=j["payload"].get("silent", False),
+                            lock_recipient=j["payload"].get("lockRecipient") or j["payload"].get("lock_recipient"),
                         ),
                         state=CronJobState(
                             next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
@@ -408,6 +410,8 @@ class CronService:
                         "originChannel": j.payload.origin_channel,
                         "originChatId": j.payload.origin_chat_id,
                         "originMetadata": j.payload.origin_metadata,
+                        "silent": j.payload.silent,
+                        "lockRecipient": j.payload.lock_recipient,
                     },
                     "state": {
                         "nextRunAtMs": j.state.next_run_at_ms,
@@ -665,6 +669,7 @@ class CronService:
         schedule: CronSchedule,
         message: str,
         deliver: bool = False,
+        silent: bool = False,
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
@@ -687,6 +692,7 @@ class CronService:
                 kind="agent_turn",
                 message=message,
                 deliver=deliver,
+                silent=silent,
                 channel=channel,
                 to=to,
                 channel_meta=channel_meta or {},

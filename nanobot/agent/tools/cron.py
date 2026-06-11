@@ -9,6 +9,7 @@ from typing import Any
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.context import ContextAware, RequestContext
 from nanobot.agent.tools.schema import (
+    BooleanSchema,
     IntegerSchema,
     StringSchema,
     tool_parameters_schema,
@@ -37,6 +38,16 @@ _CRON_PARAMETERS = tool_parameters_schema(
     at=StringSchema(
         "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00'). "
         "Naive values use the tool's default timezone."
+    ),
+    deliver=BooleanSchema(
+        description="Whether to deliver the execution result to the user channel (default true)",
+        default=True,
+    ),
+    silent=BooleanSchema(
+        description="If true, the job runs silently — no auto-delivery of response. "
+        "Agent must use message tool explicitly to notify. "
+        "Use for background monitoring tasks.",
+        default=False,
     ),
     job_id=StringSchema("REQUIRED when action='remove'. Job ID to remove (obtain via action='list')."),
     required=["action"],
@@ -144,12 +155,13 @@ class CronTool(Tool, ContextAware):
         at: str | None = None,
         job_id: str | None = None,
         deliver: bool = True,
+        silent: bool = False,
         **kwargs: Any,
     ) -> str:
         if action == "add":
             if self._in_cron_context.get():
                 return "Error: cannot schedule new jobs from within a cron job execution"
-            return self._add_job(name, message, every_seconds, cron_expr, tz, at)
+            return self._add_job(name, message, every_seconds, cron_expr, tz, at, deliver, silent)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
@@ -164,6 +176,8 @@ class CronTool(Tool, ContextAware):
         cron_expr: str | None,
         tz: str | None,
         at: str | None,
+        deliver: bool = True,
+        silent: bool = False,
     ) -> str:
         if not message:
             return (
@@ -214,6 +228,8 @@ class CronTool(Tool, ContextAware):
             name=name or message[:30],
             schedule=schedule,
             message=message,
+            deliver=deliver,
+            silent=silent,
             delete_after_run=delete_after,
             session_key=session_key,
             origin_channel=origin_channel,
