@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # nanobot-rotate-logs — Trunca los logs de nanobot sin crear .old
+# (WhatsApp usa neonize in-process: ya no hay bridge.log)
 # Ejecutar cada 3 horas via crontab:
-#   0 */3 * * * /Users/franciscomaestre/Desktop/data-fact-nanobot/scripts/nanobot-rotate-logs
+#   0 */3 * * * /Users/franciscomaestre/Desktop/data-fact/data-fact-nanobot/scripts/nanobot-rotate-logs
 
 LOGS_DIR="$HOME/.nanobot/logs"
 
 truncate -s0 "$LOGS_DIR/gateway.log" 2>/dev/null
-truncate -s0 "$LOGS_DIR/bridge.log"  2>/dev/null
+truncate -s0 "$LOGS_DIR/serve.log"   2>/dev/null
 rm -f "$LOGS_DIR"/*.old               2>/dev/null
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') — logs truncados" >> "$LOGS_DIR/rotate.log"

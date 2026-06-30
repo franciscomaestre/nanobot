@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# nanobot-logs — tail -f de gateway y bridge en tiempo real
-# Uso: nanobot-logs [gateway|bridge]
+# nanobot-logs — tail -f de gateway y serve en tiempo real
+# Uso: nanobot-logs [gateway|serve]
+# (WhatsApp usa neonize in-process: sus logs salen en gateway.log)
 
 LOG_DIR="$HOME/.nanobot/logs"
 GATEWAY_LOG="$LOG_DIR/gateway.log"
-BRIDGE_LOG="$LOG_DIR/bridge.log"
+SERVE_LOG="$LOG_DIR/serve.log"
 
 RESET="\033[0m"
 CYAN="\033[1;36m"
@@ -18,18 +19,18 @@ case "${1:-both}" in
     echo -e "${CYAN}── gateway.log ──────────────────────────────────${RESET}"
     exec tail -f "$GATEWAY_LOG" 2>/dev/null || { echo -e "${RED}No existe $GATEWAY_LOG${RESET}"; exit 1; }
     ;;
-  bridge)
-    echo -e "${YELLOW}── bridge.log ───────────────────────────────────${RESET}"
-    exec tail -f "$BRIDGE_LOG" 2>/dev/null || { echo -e "${RED}No existe $BRIDGE_LOG${RESET}"; exit 1; }
+  serve)
+    echo -e "${YELLOW}── serve.log ────────────────────────────────────${RESET}"
+    exec tail -f "$SERVE_LOG" 2>/dev/null || { echo -e "${RED}No existe $SERVE_LOG${RESET}"; exit 1; }
     ;;
   both|*)
-    if [[ ! -f "$GATEWAY_LOG" && ! -f "$BRIDGE_LOG" ]]; then
+    if [[ ! -f "$GATEWAY_LOG" && ! -f "$SERVE_LOG" ]]; then
       echo -e "${RED}No se encontraron logs en $LOG_DIR${RESET}"
       echo -e "${DIM}Ejecuta 'nanobot-restart' para iniciar el sistema.${RESET}"
       exit 1
     fi
 
-    echo -e "${GREEN}► nanobot logs${RESET} ${DIM}(Ctrl+C para salir | nanobot-logs gateway | nanobot-logs bridge)${RESET}"
+    echo -e "${GREEN}► nanobot logs${RESET} ${DIM}(Ctrl+C para salir | nanobot-logs gateway | nanobot-logs serve)${RESET}"
     echo ""
 
     # Lanzar dos tail -f en paralelo, cada uno prefijando sus líneas con color
@@ -41,14 +42,14 @@ case "${1:-both}" in
     PID_GW=$!
 
     {
-      tail -f "$BRIDGE_LOG" 2>/dev/null | while IFS= read -r line; do
-        printf "${YELLOW}[BR]${RESET} %s\n" "$line"
+      tail -f "$SERVE_LOG" 2>/dev/null | while IFS= read -r line; do
+        printf "${YELLOW}[SV]${RESET} %s\n" "$line"
       done
     } &
-    PID_BR=$!
+    PID_SV=$!
 
     # Al hacer Ctrl+C, matar ambos hijos
-    trap "kill $PID_GW $PID_BR 2>/dev/null; exit 0" INT TERM
+    trap "kill $PID_GW $PID_SV 2>/dev/null; exit 0" INT TERM
     wait
     ;;
 esac

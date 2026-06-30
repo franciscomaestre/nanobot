@@ -2,12 +2,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # install-launchd.sh — Instala los servicios launchd para nanobot.
 #
+# WhatsApp usa neonize (in-process, dentro del gateway) — ya NO hay bridge Node.
+#
 # Crea:
-#   ~/.nanobot/venv/               — venv fuera de ~/Desktop (evita TCC)
-#   ~/.nanobot/bin/run-bridge.sh   — wrapper para bridge
-#   ~/.nanobot/bin/run-gateway.sh  — wrapper para gateway
-#   ~/Library/LaunchAgents/com.nanobot.bridge.plist
+#   ~/.nanobot/venv/                — venv fuera de ~/Desktop (evita TCC)
+#   ~/.nanobot/bin/run-gateway.sh   — wrapper para gateway (canales + agente + WhatsApp neonize)
+#   ~/.nanobot/bin/run-serve.sh     — wrapper para serve (API OpenAI-compatible)
 #   ~/Library/LaunchAgents/com.nanobot.gateway.plist
+#   ~/Library/LaunchAgents/com.nanobot.serve.plist
 #
 # Uso:
 #   ./scripts/install-launchd.sh          # instala y arranca
@@ -35,10 +37,16 @@ for arg in "$@"; do
   [[ "$arg" == "--no-start" ]] && START=0
 done
 
-echo "📦 Instalando launchd services para nanobot"
+echo "📦 Instalando launchd services para nanobot (WhatsApp via neonize, sin bridge)"
 echo "   NANOBOT_DIR: $NANOBOT_DIR"
 echo "   HOME:        $HOME"
 echo
+
+# ── 0. Dependencia nativa para neonize (python-magic → libmagic) ─────────────
+if ! brew list libmagic &>/dev/null; then
+  echo "▶ Instalando libmagic (requerido por neonize) ..."
+  brew install libmagic 2>&1 | tail -2
+fi
 
 # ── 1. Crear venv fuera de ~/Desktop (TCC-free) ─────────────────────────────
 echo "▶ Creando venv en ~/.nanobot/venv ..."
@@ -53,8 +61,9 @@ if [[ ! -f "$LAUNCHD_VENV/bin/python3" ]]; then
   "$LAUNCHD_VENV/bin/pip" install --upgrade pip --quiet 2>&1 | tail -1
 fi
 
-echo "▶ Instalando nanobot en launchd venv ..."
-"$LAUNCHD_VENV/bin/pip" install "$NANOBOT_DIR" --quiet 2>&1 | tail -3
+echo "▶ Instalando nanobot[whatsapp] en launchd venv ..."
+# El extra [whatsapp] trae neonize + segno (QR) para el canal de WhatsApp in-process
+"$LAUNCHD_VENV/bin/pip" install "$NANOBOT_DIR[whatsapp]" --quiet 2>&1 | tail -3
 # Extras que nanobot necesita pero no están en install_requires
 "$LAUNCHD_VENV/bin/pip" install anthropic matrix-nio mistune "nh3>=0.2.17,<1.0.0" assemblyai firecrawl-py --quiet 2>&1 | tail -3
 echo "✅ Venv listo"
@@ -63,13 +72,16 @@ echo "✅ Venv listo"
 echo "▶ Instalando wrapper scripts en ~/.nanobot/bin/ ..."
 mkdir -p "$HOME/.nanobot/bin"
 
-sed -e "s|__HOME__|$HOME|g" -e "s|__NANOBOT_DIR__|$NANOBOT_DIR|g" \
-  "$NANOBOT_DIR/scripts/run-bridge.sh" > "$HOME/.nanobot/bin/run-bridge.sh"
-chmod +x "$HOME/.nanobot/bin/run-bridge.sh"
-
 sed -e "s|__HOME__|$HOME|g" \
   "$NANOBOT_DIR/scripts/run-gateway.sh" > "$HOME/.nanobot/bin/run-gateway.sh"
 chmod +x "$HOME/.nanobot/bin/run-gateway.sh"
+
+sed -e "s|__HOME__|$HOME|g" \
+  "$NANOBOT_DIR/scripts/run-serve.sh" > "$HOME/.nanobot/bin/run-serve.sh"
+chmod +x "$HOME/.nanobot/bin/run-serve.sh"
+
+# Limpiar wrapper obsoleto del bridge (neonize ya no lo usa)
+rm -f "$HOME/.nanobot/bin/run-bridge.sh" 2>/dev/null || true
 echo "✅ Wrappers instalados"
 
 # ── 3. Instalar plists ───────────────────────────────────────────────────────
@@ -78,13 +90,16 @@ mkdir -p "$HOME/Library/LaunchAgents"
 
 # Unload if already loaded
 launchctl unload "$HOME/Library/LaunchAgents/com.nanobot.gateway.plist" 2>/dev/null || true
+launchctl unload "$HOME/Library/LaunchAgents/com.nanobot.serve.plist" 2>/dev/null || true
+# Limpiar el plist obsoleto del bridge, si quedó de una instalación previa
 launchctl unload "$HOME/Library/LaunchAgents/com.nanobot.bridge.plist" 2>/dev/null || true
-
-sed "s|__HOME__|$HOME|g" \
-  "$NANOBOT_DIR/scripts/com.nanobot.bridge.plist" > "$HOME/Library/LaunchAgents/com.nanobot.bridge.plist"
+rm -f "$HOME/Library/LaunchAgents/com.nanobot.bridge.plist" 2>/dev/null || true
 
 sed "s|__HOME__|$HOME|g" \
   "$NANOBOT_DIR/scripts/com.nanobot.gateway.plist" > "$HOME/Library/LaunchAgents/com.nanobot.gateway.plist"
+
+sed "s|__HOME__|$HOME|g" \
+  "$NANOBOT_DIR/scripts/com.nanobot.serve.plist" > "$HOME/Library/LaunchAgents/com.nanobot.serve.plist"
 echo "✅ Plists instalados"
 
 # ── 4. Arrancar (opcional) ───────────────────────────────────────────────────
@@ -92,26 +107,25 @@ if [[ $START -eq 1 ]]; then
   echo "▶ Arrancando servicios ..."
   # Kill orphans
   pkill -f "nanobot gateway" 2>/dev/null || true
-  pkill -f "node.*bridge/dist/index.js" 2>/dev/null || true
-  STALE=$(lsof -ti :3001 2>/dev/null || true)
-  [[ -n "$STALE" ]] && kill "$STALE" 2>/dev/null || true
+  pkill -f "nanobot serve" 2>/dev/null || true
   sleep 1
 
-  launchctl load "$HOME/Library/LaunchAgents/com.nanobot.bridge.plist"
-  sleep 3
+  launchctl load "$HOME/Library/LaunchAgents/com.nanobot.serve.plist"
+  sleep 2
   launchctl load "$HOME/Library/LaunchAgents/com.nanobot.gateway.plist"
   sleep 5
 
-  B_PID=$(launchctl list com.nanobot.bridge 2>/dev/null | grep '"PID"' | grep -o '[0-9]*' || echo "?")
+  S_PID=$(launchctl list com.nanobot.serve 2>/dev/null | grep '"PID"' | grep -o '[0-9]*' || echo "?")
   G_PID=$(launchctl list com.nanobot.gateway 2>/dev/null | grep '"PID"' | grep -o '[0-9]*' || echo "?")
-  echo "✅ Bridge PID: $B_PID"
+  echo "✅ Serve PID: $S_PID"
   echo "✅ Gateway PID: $G_PID"
 fi
 
 echo
 echo "══════════════════════════════════════════════"
 echo "  launchd services instalados"
-echo "  Auto-restart: ON (KeepAlive)"
+echo "  WhatsApp:            neonize (in-process)"
+echo "  Auto-restart:        ON (KeepAlive)"
 echo "  Auto-start at login: ON (RunAtLoad)"
 echo ""
 echo "  Gestión:"
