@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# nanobot-restart — Para, actualiza y reinicia el stack completo de nanobot.
+# nanobot-restart — Para, actualiza y reinicia el stack de nanobot.
 #
 # Uso:
 #   nanobot-restart                    # restart normal (ejecuta tests primero)
-#   nanobot-restart --force            # fuerza reinstall pip + rebuild bridge
+#   nanobot-restart --force            # fuerza reinstall pip
 #   nanobot-restart --logs             # muestra los logs en vivo después de arrancar
 #   SKIP_TESTS=1 nanobot-restart       # salta los tests (usar con precaución)
 #
 # Procesos gestionados via launchd (auto-restart on crash):
-#   1. com.nanobot.bridge   (Node.js — WhatsApp bridge)
-#   2. com.nanobot.gateway  (Python — channels + agent + heartbeat)
+#   1. com.nanobot.gateway  (Python — channels + agent + heartbeat)
+#   2. com.nanobot.serve    (Python — serve API)
+#   El canal de WhatsApp usa neonize (in-process, sin bridge Node).
 #   El MCP server ecuador-apis es lanzado automáticamente por nanobot (stdio).
 #
 # El script auto-detecta NANOBOT_DIR buscando el repo que lo contiene.
@@ -36,19 +37,18 @@ elif [[ -z "${NANOBOT_DIR:-}" ]]; then
   fi
 fi
 
-BRIDGE_DIR="$NANOBOT_DIR/bridge"
 VENV_DIR="$NANOBOT_DIR/.venv"
 LAUNCHD_VENV="$HOME/.nanobot/venv"
 NANOBOT_BIN="$VENV_DIR/bin/nanobot"
 PYTHON_BIN="$VENV_DIR/bin/python3"
 PYTEST_BIN="$VENV_DIR/bin/python -m pytest"
 LOGS_DIR="$HOME/.nanobot/logs"
-BRIDGE_LOG="$LOGS_DIR/bridge.log"
 GATEWAY_LOG="$LOGS_DIR/gateway.log"
+SERVE_LOG="$LOGS_DIR/serve.log"
 
 # launchd plist paths
-BRIDGE_PLIST="$HOME/Library/LaunchAgents/com.nanobot.bridge.plist"
 GATEWAY_PLIST="$HOME/Library/LaunchAgents/com.nanobot.gateway.plist"
+SERVE_PLIST="$HOME/Library/LaunchAgents/com.nanobot.serve.plist"
 
 # ── Opciones ─────────────────────────────────────────────────────────────────
 FORCE=0
@@ -83,8 +83,6 @@ if [[ ! -f "$NANOBOT_BIN" ]]; then
 fi
 
 # ── 1. PRE-RELEASE TESTS ─────────────────────────────────────────────────────
-# Se ejecutan ANTES de parar nanobot para que el agente siga funcionando
-# si los tests fallan.
 step "Ejecutando pre-release smoke tests..."
 
 TEST_FILE="$NANOBOT_DIR/tests/test_prerelease.py"
@@ -112,32 +110,20 @@ fi
 # ── 2. PARAR servicios launchd ───────────────────────────────────────────────
 step "Parando servicios launchd..."
 
-if launchctl list com.nanobot.gateway &>/dev/null; then
-  launchctl unload "$GATEWAY_PLIST" 2>/dev/null || true
-  ok "Parado: com.nanobot.gateway"
-else
-  info "No estaba cargado: com.nanobot.gateway"
-fi
-
-if launchctl list com.nanobot.bridge &>/dev/null; then
-  launchctl unload "$BRIDGE_PLIST" 2>/dev/null || true
-  ok "Parado: com.nanobot.bridge"
-else
-  info "No estaba cargado: com.nanobot.bridge"
-fi
+for entry in "gateway:$GATEWAY_PLIST" "serve:$SERVE_PLIST"; do
+  svc="${entry%%:*}"
+  plist="${entry#*:}"
+  if launchctl list "com.nanobot.$svc" &>/dev/null; then
+    launchctl unload "$plist" 2>/dev/null || true
+    ok "Parado: com.nanobot.$svc"
+  else
+    info "No estaba cargado: com.nanobot.$svc"
+  fi
+done
 
 # Kill any orphan processes (from old nohup launches or launchd stragglers)
 pkill -f "nanobot gateway" 2>/dev/null || true
-pkill -f "node.*bridge/dist/index.js" 2>/dev/null || true
-
-# Fallback: kill anything holding port 3001
-STALE_PID=$(lsof -ti :3001 2>/dev/null || true)
-if [[ -n "$STALE_PID" ]]; then
-  warn "Puerto 3001 aún ocupado (PID $STALE_PID) — matando..."
-  kill $STALE_PID 2>/dev/null || true
-  sleep 1
-  kill -9 $STALE_PID 2>/dev/null || true
-fi
+pkill -f "nanobot serve" 2>/dev/null || true
 
 sleep 1
 
@@ -146,72 +132,40 @@ step "Comprobando dependencias Python..."
 
 cd "$NANOBOT_DIR"
 # Dev venv (editable install — used for tests and interactive dev)
-"$PYTHON_BIN" -m pip install -e "." --quiet 2>&1 | tail -3
+"$PYTHON_BIN" -m pip install -e ".[whatsapp]" --quiet 2>&1 | tail -3
 
 # launchd venv (non-editable — lives outside ~/Desktop to avoid TCC)
 if [[ -d "$LAUNCHD_VENV" ]]; then
-  "$LAUNCHD_VENV/bin/pip" install "$NANOBOT_DIR" --quiet 2>&1 | tail -3
+  "$LAUNCHD_VENV/bin/pip" install "$NANOBOT_DIR[whatsapp]" --quiet 2>&1 | tail -3
   ok "Dependencias Python verificadas (dev + launchd venvs)"
 else
   warn "launchd venv no encontrado en $LAUNCHD_VENV — solo dev venv actualizado"
   ok "Dependencias Python verificadas (dev venv)"
 fi
 
-# ── 4. ¿RECOMPILAR bridge? ───────────────────────────────────────────────────
-step "Comprobando bridge TypeScript..."
-
-DIST_JS="$BRIDGE_DIR/dist/index.js"
-NEWEST_TS=$(find "$BRIDGE_DIR/src" -name "*.ts" -newer "$DIST_JS" 2>/dev/null | head -1 || true)
-
-NEEDS_BUILD=0
-if [[ $FORCE -eq 1 ]]; then
-  warn "Modo --force: recompilando bridge..."
-  NEEDS_BUILD=1
-elif [[ ! -f "$DIST_JS" ]]; then
-  warn "dist/index.js no existe — compilando..."
-  NEEDS_BUILD=1
-elif [[ -n "$NEWEST_TS" ]]; then
-  warn "Archivos .ts modificados — recompilando bridge..."
-  NEEDS_BUILD=1
-else
-  ok "Bridge compilado y actualizado (sin cambios)"
-fi
-
-if [[ $NEEDS_BUILD -eq 1 ]]; then
-  cd "$BRIDGE_DIR"
-  npm run build 2>&1 | tail -5
-  ok "Bridge compilado"
-fi
-
-# ── 5. ROTAR logs ────────────────────────────────────────────────────────────
+# ── 4. ROTAR logs ────────────────────────────────────────────────────────────
 step "Rotando logs..."
 
 ROTATE_LINES=5000
-[[ -f "$BRIDGE_LOG" ]] && tail -n "$ROTATE_LINES" "$BRIDGE_LOG" > "${BRIDGE_LOG}.prev" 2>/dev/null; rm -f "$BRIDGE_LOG"
 [[ -f "$GATEWAY_LOG" ]] && tail -n "$ROTATE_LINES" "$GATEWAY_LOG" > "${GATEWAY_LOG}.prev" 2>/dev/null; rm -f "$GATEWAY_LOG"
+[[ -f "$SERVE_LOG" ]] && tail -n "$ROTATE_LINES" "$SERVE_LOG" > "${SERVE_LOG}.prev" 2>/dev/null; rm -f "$SERVE_LOG"
 ok "Logs rotados"
 
-# ── 6. ARRANCAR servicios via launchd ─────────────────────────────────────────
+# ── 5. ARRANCAR servicios via launchd ─────────────────────────────────────────
 step "Arrancando servicios via launchd..."
 
-if [[ ! -f "$BRIDGE_PLIST" ]] || [[ ! -f "$GATEWAY_PLIST" ]]; then
-  echo -e "${R}ERROR: Faltan los plists de launchd${N}"
-  echo -e "  Esperados: $BRIDGE_PLIST"
-  echo -e "             $GATEWAY_PLIST"
+if [[ ! -f "$GATEWAY_PLIST" ]]; then
+  echo -e "${R}ERROR: Falta el plist del gateway${N}"
+  echo -e "  Esperado: $GATEWAY_PLIST"
   exit 1
 fi
 
-# Bridge first (gateway needs it)
-launchctl load "$BRIDGE_PLIST" 2>&1
-sleep 3
-
-BRIDGE_PID=$(launchctl list com.nanobot.bridge 2>/dev/null | grep '"PID"' | grep -o '[0-9]*' || echo "")
-if [[ -n "$BRIDGE_PID" ]]; then
-  ok "Bridge arrancado via launchd  (PID $BRIDGE_PID)  →  $BRIDGE_LOG"
-else
-  echo -e "${R}❌  Bridge falló al arrancar. Revisa:  $BRIDGE_LOG${N}"
-  tail -20 "$BRIDGE_LOG"
-  exit 1
+# Serve (si existe)
+if [[ -f "$SERVE_PLIST" ]]; then
+  launchctl load "$SERVE_PLIST" 2>&1
+  sleep 2
+  SERVE_PID=$(launchctl list com.nanobot.serve 2>/dev/null | grep '"PID"' | grep -o '[0-9]*' || echo "")
+  [[ -n "$SERVE_PID" ]] && ok "Serve arrancado via launchd  (PID $SERVE_PID)  →  $SERVE_LOG" || warn "Serve no reportó PID (revisa $SERVE_LOG)"
 fi
 
 # Gateway
@@ -227,21 +181,21 @@ else
   exit 1
 fi
 
-# ── 7. RESUMEN ───────────────────────────────────────────────────────────────
+# ── 6. RESUMEN ───────────────────────────────────────────────────────────────
 hr
 echo -e "${BOLD}  Stack levantado (launchd — auto-restart on crash)${N}"
 hr
-echo -e "  ${G}●${N}  com.nanobot.bridge    PID ${BOLD}$BRIDGE_PID${N}"
 echo -e "  ${G}●${N}  com.nanobot.gateway   PID ${BOLD}$GATEWAY_PID${N}"
+[[ -n "${SERVE_PID:-}" ]] && echo -e "  ${G}●${N}  com.nanobot.serve     PID ${BOLD}$SERVE_PID${N}"
+echo -e "  ${B}●${N}  WhatsApp              neonize (in-process)"
 echo -e "  ${B}●${N}  MCP ecuador-apis      auto (stdio)"
 echo
 echo -e "  Logs:  tail -f $GATEWAY_LOG"
-echo -e "         tail -f $BRIDGE_LOG"
-echo -e "  Stop:  launchctl unload $GATEWAY_PLIST $BRIDGE_PLIST"
+echo -e "  Stop:  launchctl unload $GATEWAY_PLIST"
 hr
 
-# ── 8. TAIL logs (opcional) ──────────────────────────────────────────────────
+# ── 7. TAIL logs (opcional) ──────────────────────────────────────────────────
 if [[ $SHOW_LOGS -eq 1 ]]; then
   echo -e "\n${Y}Mostrando logs (Ctrl+C para salir)...${N}\n"
-  tail -f "$GATEWAY_LOG" "$BRIDGE_LOG"
+  tail -f "$GATEWAY_LOG"
 fi
